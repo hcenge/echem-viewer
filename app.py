@@ -7,6 +7,7 @@
 #     "plotly",
 #     "pandas",
 #     "pyarrow",
+#     "numpy",
 # ]
 # ///
 
@@ -25,6 +26,7 @@ def _():
     from galvani import BioLogic
     import io
     import json
+    import re
     import zipfile
     import tempfile
     import os
@@ -35,6 +37,7 @@ def _():
     from datetime import datetime
     from codegen import generate_python_code
     import gamry
+    import technique_analysis
     return (
         BioLogic,
         Path,
@@ -49,7 +52,9 @@ def _():
         os,
         pl,
         px,
+        re,
         shutil,
+        technique_analysis,
         tempfile,
         uuid,
         zipfile,
@@ -152,9 +157,9 @@ def _():
         'OCV': {'x': 'time/s', 'y': 'Ewe/V'},
         'OCP': {'x': 'time/s', 'y': 'Ewe/V'},
         'CC': {'x': 'time/s', 'y': 'Ewe/V'},
-        'PEIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
-        'GEIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
-        'EIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
+        'PEIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
+        'GEIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
+        'EIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
     }
     return TECHNIQUE_DEFAULTS, TECHNIQUE_MAP
 
@@ -209,13 +214,16 @@ def _(
     def process_files_from_dict(files_dict: dict) -> dict:
         """Process a dict of {path: bytes} containing .mpr or .dta files."""
         ec_data = {}
+        print(f"[DEBUG] process_files_from_dict called with {len(files_dict)} files")
 
         for fpath, content in files_dict.items():
             filename = Path(fpath).name
             lower_name = filename.lower()
+            print(f"[DEBUG] Processing: {filename}")
 
             # Skip unsupported file types
             if not (lower_name.endswith('.mpr') or lower_name.endswith('.dta')):
+                print(f"[DEBUG] Skipping unsupported file type: {filename}")
                 continue
 
             try:
@@ -241,13 +249,25 @@ def _(
                         technique = extract_technique_from_filename(filename)
                         source = 'biologic'
 
+                        # Detect cycles from 'cycle number' column if present
+                        cycles = []
+                        if 'cycle number' in df.columns:
+                            cycles = sorted(df['cycle number'].unique().to_list())
+
                     else:
                         # Gamry .dta file
                         df, metadata = gamry.read_gamry_file(tmp_path)
                         timestamp = None
                         label = gamry.extract_label_from_filename(filename)
-                        technique = gamry.detect_technique_from_filename(filename)
+                        # Try header first, fall back to filename
+                        technique = gamry.detect_technique_from_header(tmp_path) or gamry.detect_technique_from_filename(filename)
                         source = 'gamry'
+
+                        # Detect cycles from 'cycle number' column (added by read_gamry_file)
+                        cycles = []
+                        if 'cycle number' in df.columns:
+                            cycles = sorted(int(c) for c in df['cycle number'].unique().to_list())
+                        print(f"[DEBUG] Gamry file {filename}: technique={technique}, cycles={cycles}, columns={df.columns}")
 
                     # Save DataFrame to temp file instead of storing in memory
                     df_path = save_df(filename, df)
@@ -261,13 +281,17 @@ def _(
                         'columns': list(df.columns),
                         'technique': technique,
                         'source': source,
+                        'cycles': cycles,  # Available cycle numbers
                     }
                 finally:
                     os.unlink(tmp_path)
 
             except Exception as e:
-                print(f"Error processing {filename}: {e}")
+                print(f"[DEBUG] ERROR processing {filename}: {e}")
+                import traceback
+                traceback.print_exc()
 
+        print(f"[DEBUG] process_files_from_dict returning {len(ec_data)} files: {list(ec_data.keys())}")
         return ec_data
     return (process_files_from_dict,)
 
@@ -333,6 +357,12 @@ def _(
                     parquet_name = file_info['parquet_name']
                     df = pl.read_parquet(io.BytesIO(zf.read(parquet_name)))
                     df_path = save_df(file_info['filename'], df)
+
+                    # Detect cycles from loaded data
+                    cycles = []
+                    if 'cycle number' in df.columns:
+                        cycles = sorted(df['cycle number'].unique().to_list())
+
                     _new_data[file_info['filename']] = {
                         'path': file_info.get('path', file_info['filename']),
                         'filename': file_info['filename'],
@@ -341,6 +371,7 @@ def _(
                         'df_path': df_path,
                         'columns': list(df.columns),
                         'technique': file_info.get('technique'),
+                        'cycles': cycles,
                     }
                 set_ec_data(_new_data)
                 set_processed_files(set(_new_data.keys()))
@@ -349,16 +380,27 @@ def _(
 
     elif mpr_upload.value:
         # Add new files (skip already processed)
+        print(f"[DEBUG] Upload triggered with {len(mpr_upload.value)} file(s)")
+        print(f"[DEBUG] Already processed: {_processed}")
         _files_to_process = {}
         for f in mpr_upload.value:
+            print(f"[DEBUG] Checking file: {f.name}")
             if f.name not in _processed:
                 _files_to_process[f.name] = f.contents
+                print(f"[DEBUG] Will process: {f.name}")
+            else:
+                print(f"[DEBUG] Skipping (already processed): {f.name}")
 
         if _files_to_process:
+            print(f"[DEBUG] Processing {len(_files_to_process)} files...")
             _added = process_files_from_dict(_files_to_process)
+            print(f"[DEBUG] process_files_from_dict returned {len(_added)} files: {list(_added.keys())}")
             _new_data.update(_added)
             set_ec_data(_new_data)
             set_processed_files(_processed | set(_added.keys()))
+            print(f"[DEBUG] State updated. ec_data now has {len(_new_data)} files")
+        else:
+            print("[DEBUG] No new files to process")
 
     # Export current state as ec_data for other cells
     ec_data = get_ec_data()
@@ -366,95 +408,168 @@ def _(
 
 
 @app.cell
-def _(ec_data, mo):
-    # Technique filter - separate cell so file_selector can react to changes
-    technique_filter = None
+def _(ec_data, file_metadata):
+    # Group files by technique - uses file_metadata (edited values) with ec_data as fallback
+    files_by_technique = {}
+    detected_techniques = []
 
     if ec_data:
-        _techniques = set()
-        for _info in ec_data.values():
-            if _info.get('technique'):
-                _techniques.add(_info['technique'])
-
-        if _techniques:
-            technique_filter = mo.ui.multiselect(
-                options=sorted(_techniques),
-                label="Filter by technique",
-                value=[]
-            )
-    return (technique_filter,)
-
-
-@app.cell
-def _(ec_data, mo, technique_filter):
-    # File selector - reactive to technique_filter
-    file_selector = None
-
-    if ec_data:
-        # Get selected techniques (empty means show all)
-        _selected_techniques = []
-        if technique_filter is not None and technique_filter.value:
-            _selected_techniques = technique_filter.value
-
-        # Build file options, filtering by technique if specified
-        _file_options = {}
         for _fname, _info in ec_data.items():
-            # Skip if technique filter is active and file doesn't match
-            if _selected_techniques and _info.get('technique') not in _selected_techniques:
-                continue
+            # Use edited technique from file_metadata if available, else fall back to ec_data
+            if file_metadata and _fname in file_metadata:
+                _tech = file_metadata[_fname].get('technique')
+            else:
+                _tech = _info.get('technique')
 
-            _tech = f" [{_info['technique']}]" if _info.get('technique') else ""
-            _display = f"{_info['label']}{_tech}"
-            _file_options[_display] = _fname
+            if _tech:
+                if _tech not in files_by_technique:
+                    files_by_technique[_tech] = []
+                files_by_technique[_tech].append(_fname)
 
-        file_selector = mo.ui.multiselect(
-            options=_file_options,
-            label="Select files to plot",
-            value=list(_file_options.keys())[:5] if _file_options else []
-        )
-    return (file_selector,)
+        # Sort techniques in a logical order
+        _technique_order = ['CV', 'LSV', 'CA', 'CP', 'OCV', 'OCP', 'PEIS', 'GEIS', 'EIS', 'CC', 'ZIR']
+        detected_techniques = [t for t in _technique_order if t in files_by_technique]
+        # Add any techniques not in the predefined order
+        for t in sorted(files_by_technique.keys()):
+            if t not in detected_techniques:
+                detected_techniques.append(t)
+    return detected_techniques, files_by_technique
 
 
 @app.cell
-def _(TECHNIQUE_DEFAULTS, ec_data, file_metadata, file_selector, mo):
+def _(detected_techniques, mo):
+    # Technique tabs - one tab per detected technique
+    technique_tabs = None
+
+    if detected_techniques:
+        # Create tabs dict: {label: label} since we just need the technique name
+        _tabs_dict = {tech: tech for tech in detected_techniques}
+        technique_tabs = mo.ui.tabs(
+            _tabs_dict,
+            lazy=False  # Keep all tabs rendered for faster switching
+        )
+    return (technique_tabs,)
+
+
+@app.cell
+def _(ec_data, files_by_technique, mo, technique_tabs):
+    # File selector - filtered to active technique tab, auto-selects all files
+    file_selector = None
+    active_technique = None
+
+    if ec_data and technique_tabs is not None:
+        active_technique = technique_tabs.value
+
+        if active_technique and active_technique in files_by_technique:
+            _tech_files = files_by_technique[active_technique]
+
+            # Build file options for this technique only
+            _file_options = {}
+            for _fname in _tech_files:
+                if _fname in ec_data:
+                    _info = ec_data[_fname]
+                    _display = _info['label']
+                    _file_options[_display] = _fname
+
+            file_selector = mo.ui.multiselect(
+                options=_file_options,
+                label="Files",
+                value=list(_file_options.keys())  # Auto-select all
+            )
+    return active_technique, file_selector
+
+
+@app.cell
+def _(
+    TECHNIQUE_DEFAULTS,
+    active_technique,
+    ec_data,
+    file_metadata,
+    file_selector,
+    load_df,
+    mo,
+):
     # Chart builder with mo.ui.dictionary for proper reactivity
+    # Now uses active_technique from tabs instead of detecting predominant technique
     chart_batch = None
+    cycle_selector = None
+    technique_controls = None  # Technique-specific controls (PEIS mode, CA/CP averaging)
+    time_range_info = None  # For CA/CP: (min_time, max_time)
 
     if ec_data and file_selector is not None and file_selector.value:
         _first_file = file_selector.value[0]
         if _first_file in ec_data:
             _columns = ec_data[_first_file]['columns']
-            _columns_with_none = ["(none)"] + _columns
 
             # Escape column names for display (< and > get interpreted as HTML)
             def _escape(s):
                 return s.replace('<', '‹').replace('>', '›')
 
             _col_options = {_escape(c): c for c in _columns}
-            _col_options_none = {"(none)": "(none)", **{_escape(c): c for c in _columns}}
 
-            # Detect predominant technique from selected files
-            _technique_counts = {}
+            # Use active_technique from tabs (already filtered by tab)
+            _technique = active_technique
+
+            # Collect available cycles from selected files (for CV/LSV)
+            _all_cycles = set()
+            _has_cycles = False
             for _fname in file_selector.value:
                 if _fname in ec_data:
-                    _tech = ec_data[_fname].get('technique')
-                    if _tech:
-                        _technique_counts[_tech] = _technique_counts.get(_tech, 0) + 1
-            _predominant_technique = max(_technique_counts, key=_technique_counts.get) if _technique_counts else None
+                    _file_cycles = ec_data[_fname].get('cycles', [])
+                    if _file_cycles:
+                        _has_cycles = True
+                        _all_cycles.update(_file_cycles)
+
+            # Create cycle selector if cycles are available (CV, LSV)
+            if _has_cycles and len(_all_cycles) > 1 and _technique in ('CV', 'LSV'):
+                _sorted_cycles = sorted(int(_c) for _c in _all_cycles)
+                _cycle_options = {str(_c): _c for _c in _sorted_cycles}
+                cycle_selector = mo.ui.multiselect(
+                    options=_cycle_options,
+                    value=[str(_sorted_cycles[0])],
+                    label="Cycles"
+                )
+
+            # Create technique-specific controls (CA/CP only - PEIS mode is in chart_batch)
+            if _technique in ('CA', 'CP'):
+                # CA/CP: Time range averaging
+                # Get time range from first file
+                _df = load_df(ec_data[_first_file]['df_path'])
+                _t_min, _t_max = 0.0, 100.0
+                if 'time/s' in _df.columns:
+                    _t_min = float(_df['time/s'].min())
+                    _t_max = float(_df['time/s'].max())
+                time_range_info = (_t_min, _t_max)
+
+                technique_controls = mo.ui.dictionary({
+                    "avg_start": mo.ui.number(
+                        value=round(_t_max * 0.8, 1),  # Default to last 20%
+                        start=_t_min,
+                        stop=_t_max,
+                        step=0.1,
+                        label="Avg start (s)"
+                    ),
+                    "avg_end": mo.ui.number(
+                        value=round(_t_max, 1),
+                        start=_t_min,
+                        stop=_t_max,
+                        step=0.1,
+                        label="Avg end (s)"
+                    ),
+                })
 
             # Smart defaults based on technique
             _x_default = None
             _y_default = None
 
-            # Apply technique-based defaults if available
-            if _predominant_technique and _predominant_technique in TECHNIQUE_DEFAULTS:
-                _tech_defaults = TECHNIQUE_DEFAULTS[_predominant_technique]
+            if _technique and _technique in TECHNIQUE_DEFAULTS:
+                _tech_defaults = TECHNIQUE_DEFAULTS[_technique]
                 if _tech_defaults['x'] in _columns:
                     _x_default = _tech_defaults['x']
                 if _tech_defaults['y'] in _columns:
                     _y_default = _tech_defaults['y']
 
-            # Fallback to generic defaults if technique-based didn't work
+            # Fallback to generic defaults
             if _x_default is None:
                 _x_default = 'time/s' if 'time/s' in _columns else _columns[0]
             if _y_default is None:
@@ -474,12 +589,10 @@ def _(TECHNIQUE_DEFAULTS, ec_data, file_metadata, file_selector, mo):
 
             # Build legend source options from file_metadata columns
             _legend_options = {"Label": "label", "Filename": "filename", "Technique": "technique"}
-            # Add any custom columns from file_metadata (excluding protected fields)
             if file_metadata:
                 _first_meta = next(iter(file_metadata.values()), {})
                 for _key in _first_meta.keys():
                     if _key not in ['filename', 'label', 'technique']:
-                        # Capitalize for display
                         _display = _key.replace('_', ' ').title()
                         _legend_options[_display] = _key
 
@@ -526,7 +639,17 @@ def _(TECHNIQUE_DEFAULTS, ec_data, file_metadata, file_selector, mo):
                 # Axis controls
                 "x_scale": mo.ui.dropdown(options={"Linear": "linear", "Log": "log"}, value="Linear", label="X scale"),
                 "y_scale": mo.ui.dropdown(options={"Linear": "linear", "Log": "log"}, value="Linear", label="Y scale"),
+                "x_min": mo.ui.text(value="", label="X min", placeholder="Auto"),
+                "x_max": mo.ui.text(value="", label="X max", placeholder="Auto"),
+                "y_min": mo.ui.text(value="", label="Y min", placeholder="Auto"),
+                "y_max": mo.ui.text(value="", label="Y max", placeholder="Auto"),
                 "show_grid": mo.ui.checkbox(value=True, label="Show grid"),
+                # PEIS plot mode (Nyquist/Bode) - shown in Appearance for EIS techniques
+                "peis_mode": mo.ui.dropdown(
+                    options={"Nyquist": "nyquist", "Bode Magnitude": "bode_mag", "Bode Phase": "bode_phase"},
+                    value="Nyquist",
+                    label="EIS plot type"
+                ),
                 # Size controls
                 "plot_height": mo.ui.slider(value=500, start=300, stop=900, step=50, label="Height"),
                 "plot_width": mo.ui.slider(value=800, start=500, stop=1200, step=50, label="Width"),
@@ -543,19 +666,23 @@ def _(TECHNIQUE_DEFAULTS, ec_data, file_metadata, file_selector, mo):
                 "legend_position": mo.ui.dropdown(options=_legend_positions, value="Right", label="Position"),
                 "legend_fontsize": mo.ui.slider(value=14, start=8, stop=24, step=1, label="Font size"),
             })
-    return (chart_batch,)
+    return chart_batch, cycle_selector, technique_controls
 
 
 @app.cell
-def _(chart_batch, file_selector, mo, technique_filter):
+def _(
+    active_technique,
+    chart_batch,
+    cycle_selector,
+    file_selector,
+    mo,
+    technique_controls,
+):
     # Sidebar UI - always visible, shows placeholder when no data
-    # Always show file_selector when data is loaded (even if no files selected)
+    # Now uses technique tabs instead of technique_filter dropdown
     if file_selector is not None:
         # Build data section items (file selection)
-        _data_items = []
-        if technique_filter is not None:
-            _data_items.append(technique_filter)
-        _data_items.append(file_selector)
+        _data_items = [file_selector]
 
         # Add chart_batch controls if available (requires files to be selected)
         if chart_batch is not None:
@@ -564,6 +691,18 @@ def _(chart_batch, file_selector, mo, technique_filter):
                 chart_batch["x_col"], chart_batch["y_col"],
                 chart_batch["time_unit"],
             ])
+
+            # Add technique-specific controls based on active tab (CA/CP averaging)
+            if technique_controls is not None:
+                if active_technique in ('CA', 'CP'):
+                    _data_items.extend([
+                        technique_controls["avg_start"],
+                        technique_controls["avg_end"],
+                    ])
+
+            # Add cycle selector if available (CV/LSV)
+            if cycle_selector is not None:
+                _data_items.append(cycle_selector)
 
             # Plot type items - show stacked options only for y_stacked mode
             _plot_type_items = [chart_batch["plot_type"]]
@@ -574,11 +713,15 @@ def _(chart_batch, file_selector, mo, technique_filter):
                 ])
 
             # Build appearance items based on mode
-            _appearance_items = [
+            _appearance_items = []
+            # Add PEIS plot type dropdown for EIS techniques
+            if active_technique in ('PEIS', 'GEIS', 'EIS'):
+                _appearance_items.append(chart_batch["peis_mode"])
+            _appearance_items.extend([
                 chart_batch["color_scheme"],
                 chart_batch["line_mode"],
                 chart_batch["axis_linewidth"],
-            ]
+            ])
             # Show marker controls when markers are used
             if chart_batch["line_mode"].value in ("markers", "lines+markers"):
                 _appearance_items.extend([chart_batch["marker_type"], chart_batch["marker_size"]])
@@ -599,7 +742,12 @@ def _(chart_batch, file_selector, mo, technique_filter):
                     "**Plot Type**": mo.vstack(_plot_type_items),
                     "**Appearance**": mo.vstack(_appearance_items),
                     "**Legend**": mo.vstack(_legend_items),
-                    "**Axes**": mo.vstack([chart_batch["x_scale"], chart_batch["y_scale"], chart_batch["show_grid"]]),
+                    "**Axes**": mo.vstack([
+                        chart_batch["x_scale"], chart_batch["y_scale"],
+                        mo.hstack([chart_batch["x_min"], chart_batch["x_max"]], justify="start"),
+                        mo.hstack([chart_batch["y_min"], chart_batch["y_max"]], justify="start"),
+                        chart_batch["show_grid"],
+                    ]),
                     "**Size**": mo.vstack([chart_batch["plot_height"], chart_batch["plot_width"]]),
                     "**Labels**": mo.vstack([
                         chart_batch["plot_title"], chart_batch["x_label"], chart_batch["y_label"],
@@ -702,19 +850,37 @@ def _(
                     _source = ec_data[_fname]
                     # Start with all edited values (including custom columns)
                     _meta = dict(_row)
-                    # Override protected fields from original source
+                    # Only filename is protected - label and technique can be edited
                     _meta['filename'] = _fname
-                    _meta['label'] = _source.get('label', _fname)
-                    _meta['technique'] = _source.get('technique', '')
+                    # Use edited values if present, otherwise fall back to source
+                    if not _meta.get('label'):
+                        _meta['label'] = _source.get('label', _fname)
+                    if not _meta.get('technique'):
+                        _meta['technique'] = _source.get('technique', '')
                     file_metadata[_fname] = _meta
     return (file_metadata,)
 
 
 @app.cell
-def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
+def _(
+    active_technique,
+    chart_batch,
+    cycle_selector,
+    ec_data,
+    file_metadata,
+    file_selector,
+    go,
+    load_df,
+    pl,
+    px,
+    technique_analysis,
+    technique_controls,
+):
     # Chart figure - rebuilds when values change (uses Scattergl for performance)
+    # Now handles PEIS Nyquist/Bode modes and calculates analysis values
     chart_figure = None
     downsampled_files = []  # Track which files were downsampled
+    analysis_results = {}  # Store analysis results (iR intercept, averages)
 
     if chart_batch is not None and ec_data and file_selector is not None and file_selector.value:
         _v = chart_batch.value
@@ -732,6 +898,47 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
             _mode = _v["line_mode"]
             _grid = _v["show_grid"]
             _time_unit = _v.get("time_unit", "s")
+
+            # Handle PEIS mode - override x/y columns based on plot mode
+            _peis_mode = None
+            _negate_y = False  # Flag for Nyquist plot (negate Im(Z) for display)
+            if active_technique in ('PEIS', 'GEIS', 'EIS'):
+                _peis_mode = _v.get("peis_mode", "nyquist")
+                if _peis_mode == "nyquist":
+                    _xcol, _ycol = 'Re(Z)/Ohm', 'Im(Z)/Ohm'
+                    _negate_y = True  # Will negate for -Im(Z) display
+                elif _peis_mode == "bode_mag":
+                    _xcol, _ycol = 'freq/Hz', '|Z|/Ohm'
+                elif _peis_mode == "bode_phase":
+                    _xcol, _ycol = 'freq/Hz', 'Phase(Z)/deg'
+
+            # Calculate analysis results for CA/CP
+            if active_technique in ('CA', 'CP') and technique_controls is not None:
+                _tc = technique_controls.value
+                _avg_start = _tc.get("avg_start", 0)
+                _avg_end = _tc.get("avg_end", 100)
+                _avg_col = '<I>/mA' if active_technique == 'CA' else 'Ewe/V'
+                _averages = {}
+                for _fname in _selected:
+                    _df = load_df(ec_data[_fname]['df_path'])
+                    _avg = technique_analysis.calculate_time_average(_df, _avg_col, _avg_start, _avg_end)
+                    if _avg is not None:
+                        _averages[_fname] = _avg
+                if _averages:
+                    analysis_results['averages'] = _averages
+                    analysis_results['avg_column'] = _avg_col
+                    analysis_results['avg_range'] = (_avg_start, _avg_end)
+
+            # Calculate iR intercept for PEIS
+            if active_technique in ('PEIS', 'GEIS', 'EIS'):
+                _intercepts = {}
+                for _fname in _selected:
+                    _df = load_df(ec_data[_fname]['df_path'])
+                    _intercept = technique_analysis.find_hf_intercept(_df)
+                    if _intercept is not None:
+                        _intercepts[_fname] = _intercept
+                if _intercepts:
+                    analysis_results['ir_intercepts'] = _intercepts
             # Time conversion factor (data assumed to be in seconds)
             _time_factor = 1.0
             _time_label_suffix = "s"
@@ -760,7 +967,9 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
             if 'time' in _xcol.lower() and '/s' in _xcol:
                 _x_label_default = _x_label_default.replace('/s', f'/{_time_label_suffix}')
             _x_label = _v.get("x_label", "") or _x_label_default
-            _y_label = _v.get("y_label", "") or _escape(_ycol)
+            # For Nyquist, show -Im(Z)/Ohm as the y-axis label
+            _y_label_default = '-Im(Z)/Ohm' if _negate_y else _escape(_ycol)
+            _y_label = _v.get("y_label", "") or _y_label_default
 
             # Sort files by timestamp for time_order mode
             if _plot_type == "time_order":
@@ -818,9 +1027,18 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
                     _x_label_default = _x_label_default.replace('/s', f'/{_time_label_suffix}')
                 _x_label = _v.get("x_label", "") or _x_label_default
 
+            # Get selected cycles (if cycle selector is active)
+            _selected_cycles = None
+            if cycle_selector is not None and cycle_selector.value:
+                _selected_cycles = cycle_selector.value  # Already integers from options dict
+
             for _i, _fname in enumerate(_selected):
                 _data = ec_data[_fname]
                 _df = load_df(_data['df_path'])
+
+                # Filter by selected cycles (cast column to int for comparison)
+                if _selected_cycles is not None and 'cycle number' in _df.columns:
+                    _df = _df.filter(pl.col('cycle number').cast(pl.Int64).is_in(_selected_cycles))
 
                 # Get label based on legend_source selection
                 _lbl = _data['label']
@@ -835,6 +1053,11 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
                 if _xcol in _df.columns and _ycol in _df.columns:
                     _x_data = _df[_xcol].to_numpy().copy()
                     _y_data = _df[_ycol].to_numpy().copy()
+                    # Negate y values for Nyquist plots (-Im(Z) convention)
+                    # Note: Gamry stores Zimag as negative values, so we negate to get positive -Im(Z)
+                    # If your data appears flipped, the source file may already have -Im(Z) stored
+                    if _negate_y:
+                        _y_data = -_y_data
 
                     # Downsample if too many points (prevents huge plot output)
                     _max_points = 50000
@@ -886,16 +1109,42 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
                 'tickfont': {'size': _tick_fontsize},
             }
 
+            # Parse axis bounds (empty string = auto)
+            def _parse_bound(val):
+                if val and val.strip():
+                    try:
+                        return float(val.strip())
+                    except ValueError:
+                        return None
+                return None
+
+            _x_min = _parse_bound(_v.get("x_min", ""))
+            _x_max = _parse_bound(_v.get("x_max", ""))
+            _y_min = _parse_bound(_v.get("y_min", ""))
+            _y_max = _parse_bound(_v.get("y_max", ""))
+
+            # Build axis range (None means auto)
+            _x_range = None
+            if _x_min is not None or _x_max is not None:
+                _x_range = [_x_min, _x_max]
+            _y_range = None
+            if _y_min is not None or _y_max is not None:
+                _y_range = [_y_min, _y_max]
+
             # Build layout
+            _xaxis_config = {
+                **_axis_style,
+                'title': {'text': _x_label, 'font': {'size': _label_fontsize}},
+                'type': _v["x_scale"],
+            }
+            if _x_range:
+                _xaxis_config['range'] = _x_range
+
             _layout = {
                 'plot_bgcolor': 'rgba(0, 0, 0, 0)',
                 'font': {'family': 'Arial Black', 'size': 16},
                 'title': {'text': _title, 'font': {'size': _title_fontsize}},
-                'xaxis': {
-                    **_axis_style,
-                    'title': {'text': _x_label, 'font': {'size': _label_fontsize}},
-                    'type': _v["x_scale"],
-                },
+                'xaxis': _xaxis_config,
                 'showlegend': _show_legend,
                 'legend': _legend_config,
                 'annotations': [],  # Explicitly clear any annotations
@@ -926,6 +1175,9 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
                         'anchor': _xaxis_anchor,
                         'matches': 'x' if _i > 0 else None,  # Sync with first x-axis
                     }
+                    # Add x range to first axis only (others sync via matches)
+                    if _i == 0 and _x_range:
+                        _layout[_xaxis_key]['range'] = _x_range
                     # Remove None values
                     if _layout[_xaxis_key].get('matches') is None:
                         del _layout[_xaxis_key]['matches']
@@ -942,21 +1194,63 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
                         'showticklabels': not _hide_y_labels,
                         'anchor': _yaxis_anchor,
                     }
+                    # Add y range to all y-axes in stacked mode
+                    if _y_range:
+                        _layout[_yaxis_key]['range'] = _y_range
             else:
                 # Single y-axis for overlay/time_order
-                _layout['yaxis'] = {
+                _yaxis_config = {
                     **_axis_style,
                     'type': _v["y_scale"],
                     'title': {'text': _y_label, 'font': {'size': _label_fontsize}},
                 }
+                if _y_range:
+                    _yaxis_config['range'] = _y_range
+                _layout['yaxis'] = _yaxis_config
 
             chart_figure.update_layout(**_layout)
-    return chart_figure, downsampled_files
+    return analysis_results, chart_figure, downsampled_files
 
 
 @app.cell
-def _(chart_figure, chart_sidebar, go, mo):
-    # Combine sidebar and chart - always show chart area
+def _(active_technique, analysis_results, ec_data, mo):
+    # Analysis output display - shows technique-specific results below the plot
+    analysis_output = None
+
+    if analysis_results:
+        _items = []
+
+        # CA/CP: Time range averaging
+        if 'averages' in analysis_results:
+            _avgs = analysis_results['averages']
+            _col = analysis_results['avg_column']
+            _range = analysis_results['avg_range']
+            _unit = 'mA' if 'mA' in _col else 'V'
+            _label = 'Current' if active_technique == 'CA' else 'Voltage'
+
+            _lines = [f"**Average {_label}** ({_range[0]:.1f}s - {_range[1]:.1f}s):"]
+            for _fname, _avg in _avgs.items():
+                _file_label = ec_data[_fname]['label'] if _fname in ec_data else _fname
+                _lines.append(f"- {_file_label}: **{_avg:.4f} {_unit}**")
+            _items.append(mo.md('\n'.join(_lines)))
+
+        # PEIS: iR intercept
+        if 'ir_intercepts' in analysis_results:
+            _intercepts = analysis_results['ir_intercepts']
+            _lines = ["**R_solution (HF intercept)**:"]
+            for _fname, _ir in _intercepts.items():
+                _file_label = ec_data[_fname]['label'] if _fname in ec_data else _fname
+                _lines.append(f"- {_file_label}: **{_ir:.3f} \u03a9**")
+            _items.append(mo.md('\n'.join(_lines)))
+
+        if _items:
+            analysis_output = mo.vstack(_items, gap=1)
+    return (analysis_output,)
+
+
+@app.cell
+def _(analysis_output, chart_figure, chart_sidebar, go, mo, technique_tabs):
+    # Combine sidebar and chart with technique tabs above plot
     # Show placeholder if no figure or figure has no traces
     _has_data = chart_figure is not None and len(chart_figure.data) > 0
 
@@ -973,11 +1267,21 @@ def _(chart_figure, chart_sidebar, go, mo):
         )
         _display_chart = _empty_fig
 
+    # Build the plot area with tabs above
+    _plot_items = []
+    if technique_tabs is not None:
+        _plot_items.append(technique_tabs)
+    _plot_items.append(_display_chart)
+    if analysis_output is not None:
+        _plot_items.append(analysis_output)
+
+    _plot_area = mo.vstack(_plot_items, gap=1)
+
     if chart_sidebar is not None:
-        chart_section = mo.hstack([chart_sidebar, _display_chart],
+        chart_section = mo.hstack([chart_sidebar, _plot_area],
             justify="start", gap=2, align="start", widths=[1, 4])
     else:
-        chart_section = mo.hstack([mo.md(""), _display_chart],
+        chart_section = mo.hstack([mo.md(""), _plot_area],
             justify="start", gap=2, align="start", widths=[1, 4])
     return (chart_section,)
 
