@@ -5,7 +5,6 @@
 #     "galvani",
 #     "polars",
 #     "plotly",
-#     "altair",
 #     "pandas",
 #     "pyarrow",
 # ]
@@ -21,22 +20,28 @@ app = marimo.App(width="full")
 def _():
     import marimo as mo
     import polars as pl
-    import pandas as pd
     import plotly.graph_objects as go
     import plotly.express as px
     from galvani import BioLogic
     import io
     import json
     import zipfile
-    import re
     import tempfile
     import os
+    import uuid
+    import atexit
+    import shutil
     from pathlib import Path
     from datetime import datetime
+    from codegen import generate_python_code
+    import gamry
     return (
         BioLogic,
         Path,
+        atexit,
         datetime,
+        gamry,
+        generate_python_code,
         go,
         io,
         json,
@@ -44,10 +49,37 @@ def _():
         os,
         pl,
         px,
-        re,
+        shutil,
         tempfile,
+        uuid,
         zipfile,
     )
+
+
+@app.cell
+def _(atexit, os, pl, shutil, uuid):
+    # Session-based temp storage for DataFrames (avoids large objects in Marimo state)
+    _session_id = str(uuid.uuid4())[:8]
+    session_data_dir = f"/tmp/echem_viewer_{_session_id}"
+    os.makedirs(session_data_dir, exist_ok=True)
+
+    # Clean up temp dir when session ends
+    def _cleanup():
+        if os.path.exists(session_data_dir):
+            shutil.rmtree(session_data_dir, ignore_errors=True)
+    atexit.register(_cleanup)
+
+    def save_df(filename: str, df: pl.DataFrame) -> str:
+        """Save DataFrame to temp parquet file, return path."""
+        safe_name = filename.replace('/', '_').replace('\\', '_')
+        path = f"{session_data_dir}/{safe_name}.parquet"
+        df.write_parquet(path)
+        return path
+
+    def load_df(path: str) -> pl.DataFrame:
+        """Load DataFrame from temp parquet file."""
+        return pl.read_parquet(path)
+    return load_df, save_df
 
 
 @app.cell
@@ -110,7 +142,21 @@ def _():
         'Constant Voltage': 'CV',
         'IR compensation (PEIS)': 'ZIR',
     }
-    return (TECHNIQUE_MAP,)
+    # Default x/y column assignments per technique
+    # Note: ZIR excluded - single-row resistance measurement, handled in Processing section
+    TECHNIQUE_DEFAULTS = {
+        'CV': {'x': 'Ewe/V', 'y': '<I>/mA'},
+        'LSV': {'x': 'Ewe/V', 'y': '<I>/mA'},
+        'CA': {'x': 'time/s', 'y': '<I>/mA'},
+        'CP': {'x': 'time/s', 'y': 'Ewe/V'},
+        'OCV': {'x': 'time/s', 'y': 'Ewe/V'},
+        'OCP': {'x': 'time/s', 'y': 'Ewe/V'},
+        'CC': {'x': 'time/s', 'y': 'Ewe/V'},
+        'PEIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
+        'GEIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
+        'EIS': {'x': 'Re(Z)/Ohm', 'y': '-Im(Z)/Ohm'},
+    }
+    return TECHNIQUE_DEFAULTS, TECHNIQUE_MAP
 
 
 @app.cell
@@ -154,45 +200,67 @@ def _(
     Path,
     extract_label_from_filename,
     extract_technique_from_filename,
+    gamry,
     os,
     pl,
+    save_df,
     tempfile,
 ):
     def process_files_from_dict(files_dict: dict) -> dict:
-        """Process a dict of {path: bytes} containing .mpr files."""
+        """Process a dict of {path: bytes} containing .mpr or .dta files."""
         ec_data = {}
 
         for fpath, content in files_dict.items():
-            if not fpath.endswith('.mpr'):
+            filename = Path(fpath).name
+            lower_name = filename.lower()
+
+            # Skip unsupported file types
+            if not (lower_name.endswith('.mpr') or lower_name.endswith('.dta')):
                 continue
 
-            filename = Path(fpath).name
-
             try:
-                with tempfile.NamedTemporaryFile(suffix='.mpr', delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(
+                    suffix='.mpr' if lower_name.endswith('.mpr') else '.dta',
+                    delete=False
+                ) as tmp:
                     tmp.write(content)
                     tmp_path = tmp.name
 
                 try:
-                    mpr_data = BioLogic.MPRfile(tmp_path)
-                    data_dict = {col: mpr_data.data[col] for col in mpr_data.data.dtype.names}
-                    df = pl.DataFrame(data_dict)
+                    if lower_name.endswith('.mpr'):
+                        # BioLogic .mpr file
+                        mpr_data = BioLogic.MPRfile(tmp_path)
+                        data_dict = {col: mpr_data.data[col] for col in mpr_data.data.dtype.names}
+                        df = pl.DataFrame(data_dict)
 
-                    timestamp = None
-                    if hasattr(mpr_data, 'timestamp') and mpr_data.timestamp:
-                        timestamp = mpr_data.timestamp.isoformat()
+                        timestamp = None
+                        if hasattr(mpr_data, 'timestamp') and mpr_data.timestamp:
+                            timestamp = mpr_data.timestamp.isoformat()
 
-                    label = extract_label_from_filename(filename)
-                    technique = extract_technique_from_filename(filename)
+                        label = extract_label_from_filename(filename)
+                        technique = extract_technique_from_filename(filename)
+                        source = 'biologic'
+
+                    else:
+                        # Gamry .dta file
+                        df, metadata = gamry.read_gamry_file(tmp_path)
+                        timestamp = None
+                        label = gamry.extract_label_from_filename(filename)
+                        technique = gamry.detect_technique_from_filename(filename)
+                        source = 'gamry'
+
+                    # Save DataFrame to temp file instead of storing in memory
+                    df_path = save_df(filename, df)
 
                     ec_data[filename] = {
                         'path': fpath,
                         'filename': filename,
                         'label': label,
                         'timestamp': timestamp,
-                        'df': df,
+                        'df_path': df_path,  # Path to temp parquet file
                         'columns': list(df.columns),
                         'technique': technique,
+                        'source': source,
                     }
                 finally:
                     os.unlink(tmp_path)
@@ -206,61 +274,94 @@ def _(
 
 @app.cell
 def _(mo):
-    # File upload widgets
+    # File upload widgets - supports BioLogic (.mpr) and Gamry (.dta)
     mpr_upload = mo.ui.file(
         kind="area",
-        filetypes=[".mpr"],
+        filetypes=[".mpr", ".dta", ".DTA"],
         multiple=True,
-        label="Drop .mpr files here"
+        label="Add .mpr or .dta files"
     )
 
     session_upload = mo.ui.file(
         kind="button",
         filetypes=[".zip"],
         multiple=False,
-        label="Import previous session"
+        label="Import session (.zip)"
     )
-    return mpr_upload, session_upload
+
+    # State to persist ec_data across uploads and track processed files
+    get_ec_data, set_ec_data = mo.state({})
+    get_processed_files, set_processed_files = mo.state(set())
+    return (
+        get_ec_data,
+        get_processed_files,
+        mpr_upload,
+        session_upload,
+        set_ec_data,
+        set_processed_files,
+    )
 
 
 @app.cell
 def _(
+    get_ec_data,
+    get_processed_files,
     io,
     json,
     mpr_upload,
     pl,
     process_files_from_dict,
+    save_df,
     session_upload,
+    set_ec_data,
+    set_processed_files,
     zipfile,
 ):
-    # Process uploaded files
-    ec_data = {}
+    # Process uploaded files - adds to existing data instead of replacing
+    _current_data = get_ec_data()
+    _processed = get_processed_files()
+    _new_data = dict(_current_data)  # Copy current data
 
     if session_upload.value:
+        # Session import replaces all data
         try:
             zip_bytes = session_upload.value[0].contents
             with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
                 metadata = json.loads(zf.read('metadata.json').decode('utf-8'))
+                _new_data = {}  # Clear for session import
                 for file_info in metadata['files']:
                     parquet_name = file_info['parquet_name']
                     df = pl.read_parquet(io.BytesIO(zf.read(parquet_name)))
-                    ec_data[file_info['filename']] = {
+                    df_path = save_df(file_info['filename'], df)
+                    _new_data[file_info['filename']] = {
                         'path': file_info.get('path', file_info['filename']),
                         'filename': file_info['filename'],
                         'label': file_info.get('label', file_info['filename']),
                         'timestamp': file_info.get('timestamp'),
-                        'df': df,
+                        'df_path': df_path,
                         'columns': list(df.columns),
                         'technique': file_info.get('technique'),
                     }
+                set_ec_data(_new_data)
+                set_processed_files(set(_new_data.keys()))
         except Exception as e:
             print(f"Error importing session: {e}")
 
     elif mpr_upload.value:
-        files_dict = {}
+        # Add new files (skip already processed)
+        _files_to_process = {}
         for f in mpr_upload.value:
-            files_dict[f.name] = f.contents
-        ec_data = process_files_from_dict(files_dict)
+            if f.name not in _processed:
+                _files_to_process[f.name] = f.contents
+
+        if _files_to_process:
+            _added = process_files_from_dict(_files_to_process)
+            _new_data.update(_added)
+            set_ec_data(_new_data)
+            set_processed_files(_processed | set(_added.keys()))
+
+    # Export current state as ec_data for other cells
+    ec_data = get_ec_data()
     return (ec_data,)
 
 
@@ -315,7 +416,7 @@ def _(ec_data, mo, technique_filter):
 
 
 @app.cell
-def _(ec_data, file_metadata, file_selector, mo):
+def _(TECHNIQUE_DEFAULTS, ec_data, file_metadata, file_selector, mo):
     # Chart builder with mo.ui.dictionary for proper reactivity
     chart_batch = None
 
@@ -328,16 +429,39 @@ def _(ec_data, file_metadata, file_selector, mo):
             # Escape column names for display (< and > get interpreted as HTML)
             def _escape(s):
                 return s.replace('<', '‹').replace('>', '›')
+
             _col_options = {_escape(c): c for c in _columns}
             _col_options_none = {"(none)": "(none)", **{_escape(c): c for c in _columns}}
 
-            # Smart defaults
-            _x_default = 'time/s' if 'time/s' in _columns else _columns[0]
+            # Detect predominant technique from selected files
+            _technique_counts = {}
+            for _fname in file_selector.value:
+                if _fname in ec_data:
+                    _tech = ec_data[_fname].get('technique')
+                    if _tech:
+                        _technique_counts[_tech] = _technique_counts.get(_tech, 0) + 1
+            _predominant_technique = max(_technique_counts, key=_technique_counts.get) if _technique_counts else None
+
+            # Smart defaults based on technique
+            _x_default = None
             _y_default = None
-            for _col in ['<I>/mA', 'I/mA', '<I>/A', 'I/A', 'Ewe/V']:
-                if _col in _columns:
-                    _y_default = _col
-                    break
+
+            # Apply technique-based defaults if available
+            if _predominant_technique and _predominant_technique in TECHNIQUE_DEFAULTS:
+                _tech_defaults = TECHNIQUE_DEFAULTS[_predominant_technique]
+                if _tech_defaults['x'] in _columns:
+                    _x_default = _tech_defaults['x']
+                if _tech_defaults['y'] in _columns:
+                    _y_default = _tech_defaults['y']
+
+            # Fallback to generic defaults if technique-based didn't work
+            if _x_default is None:
+                _x_default = 'time/s' if 'time/s' in _columns else _columns[0]
+            if _y_default is None:
+                for _col in ['<I>/mA', 'I/mA', '<I>/A', 'I/A', 'Ewe/V']:
+                    if _col in _columns:
+                        _y_default = _col
+                        break
             if _y_default is None:
                 _y_default = _columns[1] if len(_columns) > 1 else _columns[0]
 
@@ -384,8 +508,7 @@ def _(ec_data, file_metadata, file_selector, mo):
                 "hide_y_labels": mo.ui.checkbox(value=False, label="Hide Y labels"),
                 # Data controls (escape defaults to match escaped keys)
                 "x_col": mo.ui.dropdown(options=_col_options, value=_escape(_x_default), label="X column"),
-                "y_col": mo.ui.dropdown(options=_col_options, value=_escape(_y_default), label="Y column (primary)"),
-                "y2_col": mo.ui.dropdown(options=_col_options_none, value="(none)", label="Y column (secondary)"),
+                "y_col": mo.ui.dropdown(options=_col_options, value=_escape(_y_default), label="Y column"),
                 "time_unit": mo.ui.dropdown(
                     options={"Seconds (s)": "s", "Minutes (min)": "min", "Hours (h)": "h"},
                     value="Seconds (s)", label="Time unit (for x-axis)"
@@ -438,7 +561,7 @@ def _(chart_batch, file_selector, mo, technique_filter):
         if chart_batch is not None:
             # Add column selectors to data section
             _data_items.extend([
-                chart_batch["x_col"], chart_batch["y_col"], chart_batch["y2_col"],
+                chart_batch["x_col"], chart_batch["y_col"],
                 chart_batch["time_unit"],
             ])
 
@@ -539,18 +662,43 @@ def _(ec_data, mo):
 
 
 @app.cell
-def _(ec_data, metadata_editor):
+def _(
+    ec_data,
+    get_ec_data,
+    get_processed_files,
+    metadata_editor,
+    os,
+    set_ec_data,
+    set_processed_files,
+):
     # Build file_metadata dict from edited data_editor values (reactive to edits)
-    # Protected fields (filename, label, technique) always come from ec_data
-    # User-editable fields (legend, custom columns) come from editor
+    # Also handles file deletion when rows are removed from the editor
     file_metadata = {}
 
     if metadata_editor is not None and ec_data:
         _edited_data = metadata_editor.value  # List of dicts from data_editor
-        if _edited_data is not None and len(_edited_data) > 0:
+        if _edited_data is not None:
+            # Get filenames currently in editor
+            _editor_files = {_row['filename'] for _row in _edited_data if 'filename' in _row}
+            _current_files = set(ec_data.keys())
+
+            # Detect deleted files (in ec_data but not in editor)
+            _deleted_files = _current_files - _editor_files
+            if _deleted_files:
+                _new_data = {k: v for k, v in get_ec_data().items() if k not in _deleted_files}
+                _new_processed = get_processed_files() - _deleted_files
+                # Clean up temp files for deleted entries
+                for _fname in _deleted_files:
+                    _old_path = ec_data[_fname].get('df_path')
+                    if _old_path and os.path.exists(_old_path):
+                        os.unlink(_old_path)
+                set_ec_data(_new_data)
+                set_processed_files(_new_processed)
+
+            # Build file_metadata for remaining files
             for _row in _edited_data:
-                _fname = _row['filename']
-                if _fname in ec_data:
+                _fname = _row.get('filename')
+                if _fname and _fname in ec_data:
                     _source = ec_data[_fname]
                     # Start with all edited values (including custom columns)
                     _meta = dict(_row)
@@ -563,9 +711,10 @@ def _(ec_data, metadata_editor):
 
 
 @app.cell
-def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
+def _(chart_batch, ec_data, file_metadata, file_selector, go, load_df, px):
     # Chart figure - rebuilds when values change (uses Scattergl for performance)
     chart_figure = None
+    downsampled_files = []  # Track which files were downsampled
 
     if chart_batch is not None and ec_data and file_selector is not None and file_selector.value:
         _v = chart_batch.value
@@ -580,7 +729,6 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
             _palette = getattr(px.colors.sequential, _v["color_scheme"], px.colors.sequential.Viridis)
             _colors = [_palette[int(i * (len(_palette) - 1) / max(_n - 1, 1))] for i in range(_n)]
             _xcol, _ycol = _v["x_col"], _v["y_col"]
-            _y2col = _v["y2_col"] if _v["y2_col"] != "(none)" else None
             _mode = _v["line_mode"]
             _grid = _v["show_grid"]
             _time_unit = _v.get("time_unit", "s")
@@ -656,9 +804,23 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
             else:
                 _domains = [[0, 1]] * _n
 
+            # For time_order mode, override x column to time/s (required for offset logic)
+            if _plot_type == "time_order":
+                # Find a time column from the first file's columns
+                _first_cols = ec_data[_selected[0]]['columns'] if _selected else []
+                for _time_col in ['time/s', 'T', 'Time', 'time']:
+                    if _time_col in _first_cols:
+                        _xcol = _time_col
+                        break
+                # Update x label to reflect time column
+                _x_label_default = _escape(_xcol)
+                if 'time' in _xcol.lower() and '/s' in _xcol:
+                    _x_label_default = _x_label_default.replace('/s', f'/{_time_label_suffix}')
+                _x_label = _v.get("x_label", "") or _x_label_default
+
             for _i, _fname in enumerate(_selected):
                 _data = ec_data[_fname]
-                _df = _data['df']
+                _df = load_df(_data['df_path'])
 
                 # Get label based on legend_source selection
                 _lbl = _data['label']
@@ -673,6 +835,16 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
                 if _xcol in _df.columns and _ycol in _df.columns:
                     _x_data = _df[_xcol].to_numpy().copy()
                     _y_data = _df[_ycol].to_numpy().copy()
+
+                    # Downsample if too many points (prevents huge plot output)
+                    _max_points = 50000
+                    _original_len = len(_x_data)
+                    if _original_len > _max_points:
+                        # Use ceiling division to ensure we get at most _max_points
+                        _step = (_original_len + _max_points - 1) // _max_points
+                        _x_data = _x_data[::_step]
+                        _y_data = _y_data[::_step]
+                        downsampled_files.append((_fname, _original_len, len(_x_data)))
 
                     # Apply time conversion if x column is time-based
                     if 'time' in _xcol.lower():
@@ -696,21 +868,6 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
                         xaxis=_xaxis_ref, yaxis=_yaxis_ref,
                         line=dict(color=_colors[_i], width=_trace_lw),
                         marker=dict(color=_colors[_i], size=_marker_size, symbol=_marker_type)))
-
-                # Secondary y-axis (only for overlay/time_order modes)
-                if _y2col and _plot_type != "y_stacked" and _xcol in _df.columns and _y2col in _df.columns:
-                    _x_data2 = _df[_xcol].to_numpy().copy()
-                    _y_data2 = _df[_y2col].to_numpy().copy()
-                    # Apply time conversion if x column is time-based
-                    if 'time' in _xcol.lower():
-                        _x_data2 = _x_data2 * _time_factor
-                    if _plot_type == "time_order" and _i > 0:
-                        _x_data2 = _x_data2 + _x_offset
-                    chart_figure.add_trace(go.Scattergl(
-                        x=_x_data2, y=_y_data2, mode=_mode,
-                        name=f"{_lbl} ({_escape(_y2col)})", yaxis='y2',
-                        line=dict(color=_colors[_i], width=_trace_lw, dash='dash'),
-                        marker=dict(color=_colors[_i], size=_marker_size, symbol='diamond')))
 
             _title = _v["plot_title"] if _v["plot_title"] else f"EC Data ({_n} files)"
 
@@ -748,9 +905,12 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
                 'hovermode': 'x unified',
             }
 
-            # Configure axes
+            # Configure axes (always clear annotations - not used)
+            _layout['annotations'] = []
+
             if _plot_type == "y_stacked" and _n > 1:
                 # Create separate x-axis and y-axis for each subplot
+                _middle_idx = _n // 2  # Put y-label on middle subplot
                 for _i in range(_n):
                     _xaxis_key = 'xaxis' if _i == 0 else f'xaxis{_i + 1}'
                     _yaxis_key = 'yaxis' if _i == 0 else f'yaxis{_i + 1}'
@@ -770,30 +930,18 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
                     if _layout[_xaxis_key].get('matches') is None:
                         del _layout[_xaxis_key]['matches']
 
-                    # Y-axis (no individual titles - use centered annotation instead)
+                    # Y-axis: put title on middle subplot only
+                    _y_title = ''
+                    if _i == _middle_idx and not _hide_y_labels:
+                        _y_title = {'text': _y_label, 'font': {'size': _label_fontsize}}
                     _layout[_yaxis_key] = {
                         **_axis_style,
                         'type': _v["y_scale"],
                         'domain': _domains[_i],
-                        'title': '',
+                        'title': _y_title,
                         'showticklabels': not _hide_y_labels,
                         'anchor': _yaxis_anchor,
                     }
-
-                # Add centered y-axis label as annotation for stacked plots
-                if not _hide_y_labels:
-                    _layout['annotations'] = [{
-                        'text': _y_label,
-                        'xref': 'paper',
-                        'yref': 'paper',
-                        'x': -0.15,
-                        'y': 0.5,
-                        'showarrow': False,
-                        'textangle': -90,
-                        'font': {'size': _label_fontsize},
-                    }]
-                    # Increase left margin for stacked y-label annotation
-                    _layout['margin']['l'] = 120
             else:
                 # Single y-axis for overlay/time_order
                 _layout['yaxis'] = {
@@ -801,19 +949,9 @@ def _(chart_batch, ec_data, file_metadata, file_selector, go, px):
                     'type': _v["y_scale"],
                     'title': {'text': _y_label, 'font': {'size': _label_fontsize}},
                 }
-                # Secondary y-axis if needed
-                if _y2col:
-                    _layout['yaxis2'] = {
-                        **_axis_style,
-                        'title': {'text': _escape(_y2col), 'font': {'size': _label_fontsize}},
-                        'type': _v["y_scale"],
-                        'overlaying': 'y',
-                        'side': 'right',
-                        'showgrid': False,
-                    }
 
             chart_figure.update_layout(**_layout)
-    return (chart_figure,)
+    return chart_figure, downsampled_files
 
 
 @app.cell
@@ -845,6 +983,21 @@ def _(chart_figure, chart_sidebar, go, mo):
 
 
 @app.cell
+def _(downsampled_files, mo):
+    # Downsampling warning - displayed below metadata editor (compact single line)
+    downsample_warning = None
+    if downsampled_files:
+        _n = len(downsampled_files)
+        _total_orig = sum(x[1] for x in downsampled_files)
+        _total_new = sum(x[2] for x in downsampled_files)
+        downsample_warning = mo.md(
+            f"*{_n} file{'s' if _n > 1 else ''} downsampled for display: "
+            f"{_total_orig:,} → {_total_new:,} points (full data preserved in exports)*"
+        )
+    return (downsample_warning,)
+
+
+@app.cell
 def _(mo):
     # Export format selector
     export_format = mo.ui.radio(
@@ -866,37 +1019,72 @@ def _(
     export_format,
     file_metadata,
     file_selector,
+    generate_python_code,
     io,
     json,
+    load_df,
     mo,
     pl,
     zipfile,
 ):
     # Export button - changes based on format selection
     export_button = None
+    export_python_button = None
 
     if ec_data:
         _zip_buffer = io.BytesIO()
         _timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         _chart_values = chart_batch.value if chart_batch is not None else {}
+        _selected_files = list(file_selector.value) if file_selector is not None and file_selector.value else []
 
         if export_format.value == "parquet":
             # Parquet export with metadata
             with zipfile.ZipFile(_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as _zf:
+                # Build UI state with full chart settings
+                _ui_state = {
+                    'selected_files': _selected_files,
+                }
+                if _chart_values:
+                    _ui_state['plot_settings'] = {
+                        'x_column': _chart_values.get("x_col"),
+                        'y_column': _chart_values.get("y_col"),
+                        'plot_type': _chart_values.get("plot_type"),
+                        'time_unit': _chart_values.get("time_unit"),
+                        'color_scheme': _chart_values.get("color_scheme"),
+                        'line_mode': _chart_values.get("line_mode"),
+                        'marker_type': _chart_values.get("marker_type"),
+                        'marker_size': _chart_values.get("marker_size"),
+                        'trace_linewidth': _chart_values.get("trace_linewidth"),
+                        'axis_linewidth': _chart_values.get("axis_linewidth"),
+                        'x_scale': _chart_values.get("x_scale"),
+                        'y_scale': _chart_values.get("y_scale"),
+                        'show_grid': _chart_values.get("show_grid"),
+                        'show_legend': _chart_values.get("show_legend"),
+                        'legend_source': _chart_values.get("legend_source"),
+                        'legend_position': _chart_values.get("legend_position"),
+                        'legend_fontsize': _chart_values.get("legend_fontsize"),
+                        'plot_height': _chart_values.get("plot_height"),
+                        'plot_width': _chart_values.get("plot_width"),
+                        'plot_title': _chart_values.get("plot_title"),
+                        'x_label': _chart_values.get("x_label"),
+                        'y_label': _chart_values.get("y_label"),
+                        'title_fontsize': _chart_values.get("title_fontsize"),
+                        'label_fontsize': _chart_values.get("label_fontsize"),
+                        'tick_fontsize': _chart_values.get("tick_fontsize"),
+                        'stacked_gap': _chart_values.get("stacked_gap"),
+                        'hide_y_labels': _chart_values.get("hide_y_labels"),
+                    }
+
                 _metadata = {
                     'exported_at': datetime.now().isoformat(),
                     'files': [],
-                    'ui_state': {
-                        'selected_files': list(file_selector.value) if file_selector is not None and file_selector.value else [],
-                        'x_column': _chart_values.get("x_col"),
-                        'y_column': _chart_values.get("y_col"),
-                    }
+                    'ui_state': _ui_state,
                 }
 
                 for _fname, _data in ec_data.items():
                     _parquet_name = _fname.replace('.mpr', '.parquet')
                     _parquet_buf = io.BytesIO()
-                    _data['df'].write_parquet(_parquet_buf)
+                    load_df(_data['df_path']).write_parquet(_parquet_buf)
                     _zf.writestr(_parquet_name, _parquet_buf.getvalue())
 
                     # Build file metadata entry, merging ec_data defaults with edited file_metadata
@@ -920,7 +1108,7 @@ def _(
             export_button = mo.download(
                 data=_zip_buffer.getvalue(),
                 filename=f"echem_session_{_timestamp}.zip",
-                label="Export"
+                label="Export Data"
             )
         else:
             # CSV export with metadata.csv
@@ -928,7 +1116,7 @@ def _(
                 # Export data files
                 for _fname, _data in ec_data.items():
                     _csv_name = _fname.replace('.mpr', '.csv')
-                    _csv_content = _data['df'].write_csv()
+                    _csv_content = load_df(_data['df_path']).write_csv()
                     _zf.writestr(_csv_name, _csv_content)
 
                 # Export metadata.csv with all file metadata
@@ -951,19 +1139,44 @@ def _(
                     _meta_df = pl.DataFrame(_meta_rows)
                     _zf.writestr('metadata.csv', _meta_df.write_csv())
 
+                # Include plot_settings.json for CSV export too
+                if _chart_values:
+                    _settings = {
+                        'selected_files': _selected_files,
+                        'plot_settings': {
+                            'x_column': _chart_values.get("x_col"),
+                            'y_column': _chart_values.get("y_col"),
+                            'plot_type': _chart_values.get("plot_type"),
+                            'color_scheme': _chart_values.get("color_scheme"),
+                            'line_mode': _chart_values.get("line_mode"),
+                        }
+                    }
+                    _zf.writestr('plot_settings.json', json.dumps(_settings, indent=2))
+
             export_button = mo.download(
                 data=_zip_buffer.getvalue(),
                 filename=f"echem_csv_{_timestamp}.zip",
-                label="Export"
+                label="Export Data"
             )
-    return (export_button,)
+
+        # Generate Python code export button
+        if _chart_values and _selected_files:
+            _python_code = generate_python_code(_chart_values, _selected_files, file_metadata)
+            export_python_button = mo.download(
+                data=_python_code.encode('utf-8'),
+                filename=f"echem_plot_{_timestamp}.py",
+                label="Export Plot Code"
+            )
+    return export_button, export_python_button
 
 
 @app.cell
 def _(
     chart_section,
+    downsample_warning,
     export_button,
     export_format,
+    export_python_button,
     metadata_editor,
     mo,
     mpr_upload,
@@ -971,15 +1184,25 @@ def _(
 ):
     # Main layout - combines all UI components
     # Build data upload section content
-    _upload_content = mo.vstack([
+    _upload_items = [
         mo.hstack([mpr_upload, session_upload], justify="start", gap=2),
         metadata_editor if metadata_editor is not None else mo.md("*No files loaded. Upload .mpr files or import a previous session.*"),
-    ], gap=2)
+    ]
+    if downsample_warning is not None:
+        _upload_items.append(downsample_warning)
+    _upload_content = mo.vstack(_upload_items, gap=2)
 
     # Build export section content
-    _export_content = mo.vstack([
-        mo.hstack([export_format, export_button], justify="start", gap=2, align="end") if export_button is not None else mo.md("*Upload data to enable export*"),
-    ], gap=2)
+    if export_button is not None:
+        _export_buttons = [export_button]
+        if export_python_button is not None:
+            _export_buttons.append(export_python_button)
+        _export_content = mo.vstack([
+            export_format,
+            mo.hstack(_export_buttons, justify="start", gap=2),
+        ], gap=2)
+    else:
+        _export_content = mo.md("*Upload data to enable export*")
 
     mo.vstack([
         mo.md("# Electrochemistry Data Viewer"),

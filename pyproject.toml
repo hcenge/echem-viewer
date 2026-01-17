@@ -9,6 +9,8 @@ dependencies = [
     "galvani>=0.4.1",
     "polars>=1.0.0",
     "plotly>=5.0.0",
+    "pyarrow>=22.0.0",
+    "pandas>=2.3.3",
 ]
 
 [tool.uv]
