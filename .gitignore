@@ -7,3 +7,5 @@ dist/
 build/
 __marimo__/
 test_data/
+node_modules/
+frontend/dist/

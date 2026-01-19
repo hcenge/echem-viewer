@@ -14,7 +14,8 @@ import type {
   UploadResponse,
 } from '../types/api';
 
-const API_BASE = 'http://localhost:8000';
+// Use relative URL in production, localhost in development
+const API_BASE = import.meta.env.DEV ? 'http://localhost:8000' : '';
 
 export function useApi() {
   const [loading, setLoading] = useState(false);
