@@ -6,3 +6,4 @@ __pycache__/
 dist/
 build/
 __marimo__/
+test_data/

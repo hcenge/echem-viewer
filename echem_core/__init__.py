@@ -11,8 +11,8 @@ __version__ = "0.1.0"
 # Types
 from .types import EchemDataset
 
-# Parsers will be imported here once created
-# from .parsers import load_file, load_file_bytes
+# Parsers
+from .parsers import load_file, load_file_bytes
 
 # Export functions will be imported here once created
 # from .export import export_session, export_session_bytes, import_session, import_session_bytes
@@ -26,8 +26,8 @@ from .types import EchemDataset
 __all__ = [
     "__version__",
     "EchemDataset",
-    # "load_file",
-    # "load_file_bytes",
+    "load_file",
+    "load_file_bytes",
     # "export_session",
     # "export_session_bytes",
     # "import_session",
