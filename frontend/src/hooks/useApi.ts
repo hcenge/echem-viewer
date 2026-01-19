@@ -10,6 +10,8 @@ import type {
   DataResponse,
   ExportRequest,
   TechniquesResponse,
+  SessionStats,
+  UploadResponse,
 } from '../types/api';
 
 const API_BASE = 'http://localhost:8000';
@@ -21,7 +23,7 @@ export function useApi() {
   const clearError = useCallback(() => setError(null), []);
 
   // Upload files
-  const uploadFiles = useCallback(async (files: File[]): Promise<FileInfo[]> => {
+  const uploadFiles = useCallback(async (files: File[]): Promise<UploadResponse> => {
     setLoading(true);
     setError(null);
     try {
@@ -174,6 +176,15 @@ export function useApi() {
     }
   }, []);
 
+  // Get session stats
+  const getStats = useCallback(async (): Promise<SessionStats> => {
+    const response = await fetch(`${API_BASE}/stats`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch stats');
+    }
+    return await response.json();
+  }, []);
+
   return {
     loading,
     error,
@@ -185,5 +196,6 @@ export function useApi() {
     getData,
     getTechniques,
     exportSession,
+    getStats,
   };
 }

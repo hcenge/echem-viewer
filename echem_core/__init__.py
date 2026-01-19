@@ -34,7 +34,7 @@ from .storage import DataStore
 from .export import session_export, session_import, csv_export
 
 # Code generation
-from .codegen import generate_plot_code
+from .codegen import generate_plot_code, generate_matplotlib_code
 
 # Transforms
 from .transforms import (
@@ -74,6 +74,7 @@ __all__ = [
     "csv_export",
     # Codegen
     "generate_plot_code",
+    "generate_matplotlib_code",
     # Transforms
     "REFERENCE_ELECTRODES",
     "convert_reference",

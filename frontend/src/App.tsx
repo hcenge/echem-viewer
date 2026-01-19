@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Box,
   CssBaseline,
@@ -10,15 +10,30 @@ import {
   Container,
   Alert,
   Snackbar,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Button,
+  Chip,
+  Tooltip,
 } from '@mui/material';
 import { useApi } from './hooks/useApi';
 import { FileTable } from './components/FileTable/index';
 import { Chart } from './components/Chart';
 import { TechniqueTabs } from './components/TechniqueTabs';
 import { Sidebar } from './components/Sidebar/index';
+import { PlotsList } from './components/PlotsList';
+import { ExportPanel } from './components/ExportPanel';
 import type { ChartSettings } from './components/Chart';
 import { CHART_DEFAULTS } from './constants/chart';
-import type { FileInfo, DataResponse } from './types/api';
+import type { FileInfo, DataResponse, PlotConfig, SessionStats, PlotConfigExport } from './types/api';
+
+// Generate unique ID for plots
+function generateId(): string {
+  return Math.random().toString(36).substring(2, 15);
+}
 
 const theme = createTheme({
   palette: {
@@ -39,16 +54,35 @@ function App() {
     updateMetadata,
     getData,
     getTechniques,
+    getStats,
+    exportSession,
   } = useApi();
 
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [stats, setStats] = useState<SessionStats | null>(null);
   const [customColumns, setCustomColumns] = useState<Record<string, Record<string, unknown>>>({});
   const [techniqueDefaults, setTechniqueDefaults] = useState<Record<string, { x: string; y: string }>>({});
   const [activeTechnique, setActiveTechnique] = useState<string | 'all'>('all');
   const [chartSettings, setChartSettings] = useState<ChartSettings>({ ...CHART_DEFAULTS });
   // Per-file cycle selection (filename -> selected cycles)
   const [selectedCycles, setSelectedCycles] = useState<Record<string, number[]>>({});
+
+  // Multi-plot state
+  const [plots, setPlots] = useState<PlotConfig[]>([]);
+  const [activePlotId, setActivePlotId] = useState<string | null>(null);
+  const [unsavedChangesDialog, setUnsavedChangesDialog] = useState<{
+    open: boolean;
+    targetPlotId: string | null;
+    action: 'switch' | 'new' | null;
+  }>({ open: false, targetPlotId: null, action: null });
+
+  // Track the last saved state to detect changes
+  const lastSavedState = useRef<{
+    selectedFiles: string[];
+    selectedCycles: Record<string, number[]>;
+    settings: ChartSettings;
+  } | null>(null);
 
   // Load files on mount
   const refreshFiles = useCallback(async () => {
@@ -71,10 +105,13 @@ function App() {
         }
         return merged;
       });
+      // Fetch stats
+      const sessionStats = await getStats();
+      setStats(sessionStats);
     } catch {
       // Error handled by useApi
     }
-  }, [listFiles]);
+  }, [listFiles, getStats]);
 
   useEffect(() => {
     refreshFiles();
@@ -86,8 +123,22 @@ function App() {
 
   // Handle file upload
   const handleUpload = async (filesToUpload: File[]) => {
-    await uploadFiles(filesToUpload);
+    const response = await uploadFiles(filesToUpload);
     await refreshFiles();
+
+    // Restore plots if importing a session
+    if (response.plots && response.plots.length > 0) {
+      const restoredPlots: PlotConfig[] = response.plots.map((p: PlotConfigExport) => ({
+        id: p.id || generateId(),
+        name: p.name,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        selectedFiles: p.selected_files,
+        selectedCycles: p.selected_cycles || {},
+        settings: p.settings as unknown as ChartSettings,
+      }));
+      setPlots((prev) => [...prev, ...restoredPlots]);
+    }
   };
 
   // Handle deleting selected files
@@ -331,6 +382,266 @@ function App() {
     }
   };
 
+  // ============== Plot Management ==============
+
+  // Check if current state has unsaved changes
+  const hasUnsavedChanges = useCallback((): boolean => {
+    if (!activePlotId || !lastSavedState.current) return false;
+
+    const saved = lastSavedState.current;
+
+    // Compare selected files
+    if (JSON.stringify(selectedFiles.sort()) !== JSON.stringify(saved.selectedFiles.sort())) {
+      return true;
+    }
+
+    // Compare selected cycles
+    if (JSON.stringify(selectedCycles) !== JSON.stringify(saved.selectedCycles)) {
+      return true;
+    }
+
+    // Compare settings
+    if (JSON.stringify(chartSettings) !== JSON.stringify(saved.settings)) {
+      return true;
+    }
+
+    return false;
+  }, [activePlotId, selectedFiles, selectedCycles, chartSettings]);
+
+  // Get active plot
+  const activePlot = useMemo(() => {
+    return plots.find((p) => p.id === activePlotId) || null;
+  }, [plots, activePlotId]);
+
+  // Generate auto-name for new plot
+  const generatePlotName = useCallback((): string => {
+    const technique = activeTechnique !== 'all' ? activeTechnique : 'Plot';
+    const existingNames = plots.map((p) => p.name);
+    let counter = 1;
+    let name = `${technique} ${counter}`;
+    while (existingNames.includes(name)) {
+      counter++;
+      name = `${technique} ${counter}`;
+    }
+    return name;
+  }, [activeTechnique, plots]);
+
+  // Save current view as a new plot or update existing
+  const handleSavePlot = useCallback(() => {
+    const now = new Date().toISOString();
+
+    if (activePlotId) {
+      // Update existing plot
+      setPlots((prev) =>
+        prev.map((p) =>
+          p.id === activePlotId
+            ? {
+                ...p,
+                updatedAt: now,
+                selectedFiles: [...selectedFiles],
+                selectedCycles: { ...selectedCycles },
+                settings: { ...chartSettings },
+              }
+            : p
+        )
+      );
+    } else {
+      // Create new plot
+      const newPlot: PlotConfig = {
+        id: generateId(),
+        name: generatePlotName(),
+        createdAt: now,
+        updatedAt: now,
+        selectedFiles: [...selectedFiles],
+        selectedCycles: { ...selectedCycles },
+        settings: { ...chartSettings },
+      };
+      setPlots((prev) => [...prev, newPlot]);
+      setActivePlotId(newPlot.id);
+    }
+
+    // Update last saved state
+    lastSavedState.current = {
+      selectedFiles: [...selectedFiles],
+      selectedCycles: { ...selectedCycles },
+      settings: { ...chartSettings },
+    };
+  }, [activePlotId, selectedFiles, selectedCycles, chartSettings, generatePlotName]);
+
+  // Load a plot's state into the editor
+  const loadPlot = useCallback((plot: PlotConfig) => {
+    setSelectedFiles(plot.selectedFiles);
+    setSelectedCycles(plot.selectedCycles);
+    setChartSettings(plot.settings);
+    setActivePlotId(plot.id);
+
+    // Update last saved state
+    lastSavedState.current = {
+      selectedFiles: [...plot.selectedFiles],
+      selectedCycles: { ...plot.selectedCycles },
+      settings: { ...plot.settings },
+    };
+  }, []);
+
+  // Handle switching to a different plot (with unsaved changes check)
+  const handleSwitchPlot = useCallback((plotId: string) => {
+    if (plotId === activePlotId) return;
+
+    if (hasUnsavedChanges()) {
+      setUnsavedChangesDialog({ open: true, targetPlotId: plotId, action: 'switch' });
+    } else {
+      const plot = plots.find((p) => p.id === plotId);
+      if (plot) loadPlot(plot);
+    }
+  }, [activePlotId, hasUnsavedChanges, plots, loadPlot]);
+
+  // Handle starting a new plot (with unsaved changes check)
+  const handleNewPlot = useCallback(() => {
+    if (hasUnsavedChanges()) {
+      setUnsavedChangesDialog({ open: true, targetPlotId: null, action: 'new' });
+    } else {
+      // Clear to defaults
+      setSelectedFiles([]);
+      setSelectedCycles({});
+      setChartSettings({ ...CHART_DEFAULTS });
+      setActivePlotId(null);
+      lastSavedState.current = null;
+    }
+  }, [hasUnsavedChanges]);
+
+  // Handle unsaved changes dialog actions
+  const handleUnsavedDialogSave = useCallback(() => {
+    handleSavePlot();
+    const { targetPlotId, action } = unsavedChangesDialog;
+    setUnsavedChangesDialog({ open: false, targetPlotId: null, action: null });
+
+    if (action === 'switch' && targetPlotId) {
+      const plot = plots.find((p) => p.id === targetPlotId);
+      if (plot) loadPlot(plot);
+    } else if (action === 'new') {
+      setSelectedFiles([]);
+      setSelectedCycles({});
+      setChartSettings({ ...CHART_DEFAULTS });
+      setActivePlotId(null);
+      lastSavedState.current = null;
+    }
+  }, [handleSavePlot, unsavedChangesDialog, plots, loadPlot]);
+
+  const handleUnsavedDialogDiscard = useCallback(() => {
+    const { targetPlotId, action } = unsavedChangesDialog;
+    setUnsavedChangesDialog({ open: false, targetPlotId: null, action: null });
+
+    if (action === 'switch' && targetPlotId) {
+      const plot = plots.find((p) => p.id === targetPlotId);
+      if (plot) loadPlot(plot);
+    } else if (action === 'new') {
+      setSelectedFiles([]);
+      setSelectedCycles({});
+      setChartSettings({ ...CHART_DEFAULTS });
+      setActivePlotId(null);
+      lastSavedState.current = null;
+    }
+  }, [unsavedChangesDialog, plots, loadPlot]);
+
+  const handleUnsavedDialogCancel = useCallback(() => {
+    setUnsavedChangesDialog({ open: false, targetPlotId: null, action: null });
+  }, []);
+
+  // Rename a plot
+  const handleRenamePlot = useCallback((plotId: string, newName: string) => {
+    setPlots((prev) =>
+      prev.map((p) =>
+        p.id === plotId ? { ...p, name: newName, updatedAt: new Date().toISOString() } : p
+      )
+    );
+  }, []);
+
+  // Delete a plot
+  const handleDeletePlot = useCallback((plotId: string) => {
+    setPlots((prev) => prev.filter((p) => p.id !== plotId));
+    if (activePlotId === plotId) {
+      setActivePlotId(null);
+      lastSavedState.current = null;
+    }
+  }, [activePlotId]);
+
+  // Duplicate a plot
+  const handleDuplicatePlot = useCallback((plotId: string) => {
+    const plot = plots.find((p) => p.id === plotId);
+    if (!plot) return;
+
+    const now = new Date().toISOString();
+    const newPlot: PlotConfig = {
+      ...plot,
+      id: generateId(),
+      name: `${plot.name} (copy)`,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setPlots((prev) => [...prev, newPlot]);
+  }, [plots]);
+
+  // Export selected plots
+  const handleExport = useCallback(async (
+    selectedPlotIds: string[],
+    format: 'parquet' | 'csv',
+    codeStyle: 'plotly' | 'matplotlib'
+  ) => {
+    // Get the selected plots
+    const selectedPlots = plots.filter((p) => selectedPlotIds.includes(p.id));
+    if (selectedPlots.length === 0) return;
+
+    // Collect all unique files used by selected plots
+    const allFiles = new Set<string>();
+    selectedPlots.forEach((plot) => {
+      plot.selectedFiles.forEach((f) => allFiles.add(f));
+    });
+
+    // Build plots config for export
+    const plotsExport: PlotConfigExport[] = selectedPlots.map((p) => ({
+      id: p.id,
+      name: p.name,
+      selected_files: p.selectedFiles,
+      selected_cycles: p.selectedCycles,
+      settings: JSON.parse(JSON.stringify(p.settings)),
+    }));
+
+    // Build file metadata for export
+    const fileMetadata: Record<string, Record<string, unknown>> = {};
+    for (const filename of allFiles) {
+      const file = files.find((f) => f.filename === filename);
+      if (file) {
+        fileMetadata[filename] = {
+          label: file.label,
+          ...customColumns[filename],
+        };
+      }
+    }
+
+    try {
+      const blob = await exportSession({
+        files: Array.from(allFiles),
+        format,
+        code_style: codeStyle,
+        plots: plotsExport,
+        file_metadata: fileMetadata,
+      });
+
+      // Download the blob
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `echem_export_${format}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      // Error handled by useApi
+      console.error('Export failed:', e);
+    }
+  }, [plots, files, customColumns, exportSession]);
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -338,9 +649,19 @@ function App() {
         {/* Header */}
         <AppBar position="static">
           <Toolbar>
-            <Typography variant="h6" component="div">
+            <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
               Electrochemistry Data Viewer
             </Typography>
+            {stats && (
+              <Tooltip title={`Memory: ~${stats.memory_mb}MB`}>
+                <Chip
+                  label={`${stats.file_count}/${stats.max_files} files`}
+                  size="small"
+                  color={stats.files_remaining < 10 ? 'warning' : 'default'}
+                  sx={{ bgcolor: 'rgba(255,255,255,0.2)', color: 'white' }}
+                />
+              </Tooltip>
+            )}
           </Toolbar>
         </AppBar>
 
@@ -379,6 +700,24 @@ function App() {
                 onTechniqueChange={handleTechniqueChange}
               />
               <Box sx={{ display: 'flex', gap: 2 }}>
+                {/* Left column: PlotsList + ExportPanel */}
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, width: 200, flexShrink: 0 }}>
+                  <PlotsList
+                    plots={plots}
+                    activePlotId={activePlotId}
+                    hasUnsavedChanges={hasUnsavedChanges()}
+                    onSavePlot={handleSavePlot}
+                    onSwitchPlot={handleSwitchPlot}
+                    onNewPlot={handleNewPlot}
+                    onRenamePlot={handleRenamePlot}
+                    onDeletePlot={handleDeletePlot}
+                    onDuplicatePlot={handleDuplicatePlot}
+                  />
+                  <ExportPanel
+                    plots={plots}
+                    onExport={handleExport}
+                  />
+                </Box>
                 <Sidebar
                   settings={chartSettings}
                   onSettingsChange={handleSettingsChange}
@@ -399,6 +738,26 @@ function App() {
             </Box>
           </Box>
         </Container>
+
+        {/* Unsaved Changes Dialog */}
+        <Dialog open={unsavedChangesDialog.open} onClose={handleUnsavedDialogCancel}>
+          <DialogTitle>Unsaved Changes</DialogTitle>
+          <DialogContent>
+            <DialogContentText>
+              You have unsaved changes to {activePlot ? `"${activePlot.name}"` : 'the current plot'}.
+              What would you like to do?
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleUnsavedDialogCancel}>Cancel</Button>
+            <Button onClick={handleUnsavedDialogDiscard} color="warning">
+              Discard
+            </Button>
+            <Button onClick={handleUnsavedDialogSave} variant="contained">
+              Save Changes
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         {/* Error Snackbar */}
         <Snackbar open={!!error} autoHideDuration={6000} onClose={clearError}>
