@@ -36,3 +36,49 @@ def calculate_time_average(
         return None
 
     return float(filtered[column].mean())
+
+
+def calculate_charge(
+    df: pl.DataFrame,
+    time_col: str = "time_s",
+    current_col: str = "current_A",
+) -> float | None:
+    """Calculate total charge Q = ∫I dt.
+
+    Args:
+        df: DataFrame (filter by cycle first if needed)
+        time_col: Name of time column
+        current_col: Name of current column
+
+    Returns:
+        Total charge in Coulombs, or None if columns missing
+    """
+    if time_col not in df.columns or current_col not in df.columns:
+        return None
+
+    import numpy as np
+    time = df[time_col].to_numpy()
+    current = df[current_col].to_numpy()
+
+    if len(time) < 2:
+        return None
+
+    return float(np.trapz(current, time))
+
+
+# --- Stubs for future implementation ---
+
+def assess_stability(df: pl.DataFrame, window_size: float) -> dict | None:
+    """Assess catalyst decay: current retention %, drift rate.
+
+    Not implemented.
+    """
+    raise NotImplementedError("Stability assessment not implemented")
+
+
+def cottrell_fit(df: pl.DataFrame) -> dict | None:
+    """Fit I vs t^(-1/2) for diffusion coefficient.
+
+    Not implemented - use instrument software.
+    """
+    raise NotImplementedError("Use instrument software for Cottrell analysis")

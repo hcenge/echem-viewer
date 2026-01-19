@@ -175,96 +175,64 @@ To add support for a new format (e.g., CH Instruments):
 ## 4. Transforms (`transforms.py`)
 
 **Decisions:**
-- General column math only (not technique-specific)
-- Computed columns added to DataFrame (persisted/exported)
+- General transforms that apply across multiple techniques
 - Functions return modified EchemDataset
+- Technique-specific analysis goes in `analysis/` instead
 
-### Public API
+### Function Tree
 
 ```python
-def add_column(
-    dataset: EchemDataset,
-    name: str,
-    expression: str
-) -> EchemDataset:
-    """
-    Add a computed column using a Polars expression.
+# --- Reference Electrode ---
+REFERENCE_ELECTRODES = {
+    "SHE": 0.0,
+    "Ag/AgCl (sat. KCl)": 0.197,
+    "Ag/AgCl (3M KCl)": 0.210,
+    "SCE": 0.244,
+    "Hg/HgO (1M NaOH)": 0.140,
+    "Hg/HgO (1M KOH)": 0.098,
+    # ... more references
+}
 
-    Example: add_column(ds, "power_W", "current_A * potential_V")
-    """
+def adjust_potential(dataset, offset_V, column="potential_V") -> EchemDataset:
+    """Shift potential by fixed offset (V_new = V + offset)."""
 
-def normalize_by_area(
-    dataset: EchemDataset,
-    area_cm2: float,
-    column: str = "current_A"
-) -> EchemDataset:
-    """Add current_density_A_cm2 column."""
+def convert_reference(dataset, from_ref, to_ref, column="potential_V") -> EchemDataset:
+    """Convert potential between reference electrode systems."""
 
-def normalize_by_mass(
-    dataset: EchemDataset,
-    mass_g: float,
-    column: str = "current_A"
-) -> EchemDataset:
-    """Add mass-normalized current column."""
+# --- iR Compensation ---
+def ir_compensate(dataset, resistance_ohm, v_col="potential_V", i_col="current_A") -> EchemDataset:
+    """Correct potential for solution resistance (V_corrected = V - I×R)."""
+
+# --- Normalization ---
+def normalize_by_area(dataset, area_cm2, column="current_A") -> EchemDataset:
+    """Add current_density_A_cm2 column (I / area)."""
+
+def normalize_by_mass(dataset, mass_g, column="current_A") -> EchemDataset:
+    """Add mass-normalized current column (I / mass)."""
+
+# --- Display Performance ---
+def downsample(df, max_points=50000, method="stride") -> pl.DataFrame:
+    """Reduce points for display. Methods: 'stride' (every Nth), 'lttb' (future)."""
 ```
 
 ### Future Additions
 
-- `smooth()` — moving average, Savitzky-Golay filter
-- `interpolate()` — resample to new x values
-- `baseline_subtract()` — subtract baseline
-- `integrate()` — cumulative integration (for charge)
+- `smooth(method, window)` — moving average, Savitzky-Golay filter
+- `interpolate(new_x)` — resample to new x values
+- `baseline_subtract(baseline_df)` — subtract background measurement
+
+### Note on Integration
+
+For charge integration (∫I dt), use numpy/scipy directly in analysis functions rather than wrapping.
 
 ---
 
 ## 5. Analysis (`analysis/`)
 
-**Decisions:**
-- Organized by technique (like parsers)
-- Functions take raw DataFrame, return results (not modify data)
-- Common utilities in `common.py`
-
-### Structure
-
-```
-analysis/
-├── __init__.py      # Exports common functions
-├── common.py        # get_time_range(), general utilities
-├── eis.py           # find_hf_intercept(), fit_circuit()
-├── ca.py            # calculate_time_average(), cottrell_fit()
-├── cv.py            # find_peaks(), tafel_slope()
-└── lsv.py           # onset_potential(), limiting_current()
-```
-
-### Example API (`analysis/eis.py`)
-
-```python
-def find_hf_intercept(df: pl.DataFrame) -> float | None:
-    """Find high-frequency x-intercept (R_solution) from Nyquist plot."""
-
-def find_lf_intercept(df: pl.DataFrame) -> float | None:
-    """Find low-frequency x-intercept (R_total) from Nyquist plot."""
-
-# Future
-def fit_circuit(df: pl.DataFrame, circuit: str) -> CircuitFitResult:
-    """Fit equivalent circuit model to EIS data."""
-```
-
-### Example API (`analysis/ca.py`)
-
-```python
-def calculate_time_average(
-    df: pl.DataFrame,
-    column: str,
-    t_start: float,
-    t_end: float
-) -> float | None:
-    """Calculate average value over time range (steady-state)."""
-
-# Future
-def cottrell_fit(df: pl.DataFrame) -> CottrellResult:
-    """Fit Cottrell equation to CA transient."""
-```
+**Philosophy:**
+- Do complex single-file analysis in instrument software (EC-Lab, Gamry Echem Analyst)
+- This tool focuses on: multi-file comparison, cross-instrument data, batch extraction
+- Keep analysis functions minimal; prioritize what instrument software does poorly
 
 ### Distinction from Transforms
 
@@ -272,22 +240,79 @@ def cottrell_fit(df: pl.DataFrame) -> CottrellResult:
 |------------|----------|
 | Modifies/adds columns | Extracts values/results |
 | Returns EchemDataset | Returns numbers, fit objects |
-| General math | Technique-specific |
+| Cross-technique | Technique-specific |
+
+### Structure
+
+```
+analysis/
+├── __init__.py
+├── ca.py            # Chronoamperometry
+├── cp.py            # Chronopotentiometry
+├── cv.py            # Cyclic Voltammetry
+├── lsv.py           # Linear Sweep Voltammetry
+├── eis.py           # Impedance Spectroscopy
+└── ocv.py           # Open Circuit
+```
+
+### analysis/ca.py — Chronoamperometry
+
+```python
+calculate_time_average(df, column, t_start, t_end)  # Steady-state current ✓
+calculate_charge(df)                                 # Total charge Q = ∫I dt
+assess_stability(df, window_size)                    # Current retention %, drift rate
+# Future: cottrell_fit() - leave to instrument software for now
+```
+
+### analysis/cp.py — Chronopotentiometry
+
+```python
+calculate_time_average(df, column, t_start, t_end)  # Steady-state potential
+find_transition_time(df)                             # τ from Sand equation
+assess_stability(df, window_size)                    # Potential drift/decay
+overpotential_at_current(df, target_current_A)       # Benchmark at fixed current density
+```
+
+### analysis/cv.py — Cyclic Voltammetry
+
+```python
+onset_potential(df, threshold_current_A)             # For overpotential calculation
+# Future: find_peaks(), peak_separation(), scan_rate_analysis() - instrument software does well
+```
+
+### analysis/lsv.py — Linear Sweep Voltammetry
+
+```python
+onset_potential(df, threshold_current_A)             # Where reaction begins
+limiting_current(df)                                 # Mass-transport plateau
+current_at_potential(df, potential_V)                # Extract value for multi-file comparison
+# Future: tafel_slope() - instrument software does well
+```
+
+### analysis/eis.py — Impedance Spectroscopy
+
+```python
+find_hf_intercept(df)                                # R_solution from Nyquist ✓
+find_lf_intercept(df)                                # R_total from Nyquist ✓
+# Circuit fitting: use dedicated tools (ZView, impedance.py, etc.)
+```
+
+### analysis/ocv.py — Open Circuit
+
+```python
+steady_state_potential(df, window_s)                 # Final equilibrium value
+```
 
 ### Required Columns by Technique
 
-Each technique expects certain columns to be present for analysis:
-Warning will be generated if the column is not present for the file even if it is the designated technique.
-
-| Technique | Abbreviation | Required Columns | Optional Columns |
-|-----------|--------------|------------------|------------------|
-| Chronoamperometry | CA | `time_s`, `current_A` | `potential_V`, `cycle` |
-| Chronopotentiometry | CP | `time_s`, `potential_V` | `current_A`, `cycle` |
-| Cyclic Voltammetry | CV | `potential_V`, `current_A` | `time_s`, `cycle` |
-| Linear Sweep Voltammetry | LSV | `potential_V`, `current_A` | `time_s` |
-| Open Circuit Voltage | OCV | `time_s`, `potential_V` | - |
-| Potentiostatic EIS | PEIS | `frequency_Hz`, `z_real_Ohm`, `z_imag_Ohm` | `z_mag_Ohm`, `z_phase_deg` |
-| Galvanostatic EIS | GEIS | `frequency_Hz`, `z_real_Ohm`, `z_imag_Ohm` | `z_mag_Ohm`, `z_phase_deg` |
+| Technique | Required Columns | Optional |
+|-----------|------------------|----------|
+| CA | `time_s`, `current_A` | `potential_V`, `cycle` |
+| CP | `time_s`, `potential_V` | `current_A`, `cycle` |
+| CV | `potential_V`, `current_A` | `time_s`, `cycle` |
+| LSV | `potential_V`, `current_A` | `time_s` |
+| OCV | `time_s`, `potential_V` | - |
+| PEIS/GEIS | `frequency_Hz`, `z_real_Ohm`, `z_imag_Ohm` | `z_mag_Ohm`, `z_phase_deg` |
 
 ---
 

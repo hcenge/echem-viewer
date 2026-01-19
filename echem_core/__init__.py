@@ -15,14 +15,69 @@ from .types import EchemDataset
 from .parsers import load_file, load_file_bytes
 
 # Analysis
-from .analysis import find_hf_intercept, find_lf_intercept, calculate_time_average
+from .analysis import (
+    find_hf_intercept,
+    find_lf_intercept,
+    calculate_time_average,
+    calculate_charge,
+    overpotential_at_current,
+    onset_potential,
+    limiting_current,
+    current_at_potential,
+    steady_state_potential,
+)
+
+# Storage
+from .storage import DataStore
+
+# Export/Import
+from .export import session_export, session_import
+
+# Code generation
+from .codegen import generate_plot_code
+
+# Transforms
+from .transforms import (
+    REFERENCE_ELECTRODES,
+    convert_reference,
+    ir_compensate,
+    normalize_by_area,
+    normalize_by_mass,
+    filter_by_cycle,
+    filter_dataset_by_cycle,
+    downsample,
+)
 
 __all__ = [
     "__version__",
     "EchemDataset",
+    # Parsers
     "load_file",
     "load_file_bytes",
+    # Analysis
     "find_hf_intercept",
     "find_lf_intercept",
     "calculate_time_average",
+    "calculate_charge",
+    "overpotential_at_current",
+    "onset_potential",
+    "limiting_current",
+    "current_at_potential",
+    "steady_state_potential",
+    # Storage
+    "DataStore",
+    # Export
+    "session_export",
+    "session_import",
+    # Codegen
+    "generate_plot_code",
+    # Transforms
+    "REFERENCE_ELECTRODES",
+    "convert_reference",
+    "ir_compensate",
+    "normalize_by_area",
+    "normalize_by_mass",
+    "filter_by_cycle",
+    "filter_dataset_by_cycle",
+    "downsample",
 ]
