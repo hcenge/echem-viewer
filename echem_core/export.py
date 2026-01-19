@@ -18,6 +18,7 @@ def session_export(
     datasets: list[EchemDataset],
     plot_settings: dict | None = None,
     include_csv: bool = False,
+    plot_code: str | None = None,
 ) -> bytes:
     """Export datasets to zip file as bytes.
 
@@ -25,6 +26,7 @@ def session_export(
         datasets: Datasets to export
         plot_settings: Optional plot configuration (for ui_state.json)
         include_csv: Also include CSV versions of data files
+        plot_code: Optional Python plotting code to include
 
     Returns:
         Zip file contents as bytes
@@ -62,6 +64,7 @@ def session_export(
                 "timestamp": ds.timestamp.isoformat() if ds.timestamp else None,
                 "label": ds.label,
                 "columns": ds.columns,
+                "cycles": ds.cycles,
                 "provenance": {
                     "original_filename": ds.original_filename,
                     "source_format": ds.source_format,
@@ -77,6 +80,63 @@ def session_export(
         # Write ui_state.json if plot settings provided
         if plot_settings:
             zf.writestr("ui_state.json", json.dumps(plot_settings, indent=2))
+
+        # Include plot code if provided
+        if plot_code:
+            zf.writestr("plot.py", plot_code)
+
+    return buffer.getvalue()
+
+
+def csv_export(
+    datasets: list[EchemDataset],
+    plot_settings: dict | None = None,
+    plot_code: str | None = None,
+) -> bytes:
+    """Export datasets to zip file with CSV format (for Excel/other software).
+
+    Args:
+        datasets: Datasets to export
+        plot_settings: Optional plot configuration (for plot_settings.json)
+        plot_code: Optional Python plotting code to include
+
+    Returns:
+        Zip file contents as bytes
+    """
+    buffer = io.BytesIO()
+
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Export each dataset as CSV in data/ subfolder
+        for ds in datasets:
+            csv_name = f"data/{ds.filename}.csv"
+            zf.writestr(csv_name, ds.df.write_csv())
+
+        # Build metadata.csv
+        meta_rows = []
+        for ds in datasets:
+            row = {
+                "filename": ds.filename,
+                "label": ds.label or ds.filename,
+                "technique": ds.technique or "",
+                "timestamp": ds.timestamp.isoformat() if ds.timestamp else "",
+            }
+            # Add user_metadata fields
+            for key, val in ds.user_metadata.items():
+                if key not in row:
+                    row[key] = val if val is not None else ""
+            meta_rows.append(row)
+
+        if meta_rows:
+            meta_df = pl.DataFrame(meta_rows)
+            zf.writestr("metadata.csv", meta_df.write_csv())
+
+        # Include plot_settings.json if provided
+        if plot_settings:
+            zf.writestr("plot_settings.json", json.dumps(plot_settings, indent=2))
+
+        # Include plot code if provided
+        if plot_code:
+            zf.writestr("plot.py", plot_code)
 
     return buffer.getvalue()
 
@@ -99,9 +159,11 @@ def session_import(content: bytes) -> tuple[list[EchemDataset], dict | None]:
         # Read metadata
         metadata = json.loads(zf.read("metadata.json").decode("utf-8"))
 
-        # Read ui_state if present
+        # Read ui_state - try separate file first, then embedded in metadata (old format)
         if "ui_state.json" in zf.namelist():
             ui_state = json.loads(zf.read("ui_state.json").decode("utf-8"))
+        elif "ui_state" in metadata:
+            ui_state = metadata["ui_state"]
 
         # Load each dataset
         for file_info in metadata["files"]:

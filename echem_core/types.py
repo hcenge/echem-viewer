@@ -102,3 +102,35 @@ GAMRY_COLUMN_MAP = {
     "Freq": ("frequency_Hz", "hertz", "hertz"),
     "Cycle": ("cycle", None, None),
 }
+
+# Map full technique names to standard abbreviations
+TECHNIQUE_MAP = {
+    "Chronoamperometry / Chronocoulometry": "CA",
+    "Chronoamperometry": "CA",
+    "Chronocoulometry": "CC",
+    "Chronopotentiometry": "CP",
+    "Cyclic Voltammetry": "CV",
+    "Linear Sweep Voltammetry": "LSV",
+    "Open Circuit Voltage": "OCV",
+    "Open Circuit Potential": "OCP",
+    "Potentio Electrochemical Impedance Spectroscopy": "PEIS",
+    "Galvano Electrochemical Impedance Spectroscopy": "GEIS",
+    "Impedance Spectroscopy": "EIS",
+    "Constant Current": "CC",
+    "Constant Voltage": "CV",
+    "IR compensation (PEIS)": "ZIR",
+}
+
+# Default x/y columns for each technique (using standardized SI column names)
+TECHNIQUE_DEFAULTS = {
+    "CV": {"x": "potential_V", "y": "current_A"},
+    "LSV": {"x": "potential_V", "y": "current_A"},
+    "CA": {"x": "time_s", "y": "current_A"},
+    "CP": {"x": "time_s", "y": "potential_V"},
+    "OCV": {"x": "time_s", "y": "potential_V"},
+    "OCP": {"x": "time_s", "y": "potential_V"},
+    "CC": {"x": "time_s", "y": "potential_V"},
+    "PEIS": {"x": "z_real_Ohm", "y": "z_imag_Ohm"},
+    "GEIS": {"x": "z_real_Ohm", "y": "z_imag_Ohm"},
+    "EIS": {"x": "z_real_Ohm", "y": "z_imag_Ohm"},
+}

@@ -8,6 +8,7 @@
 #     "pandas",
 #     "pyarrow",
 #     "numpy",
+#     "pint",
 # ]
 # ///
 
@@ -23,61 +24,57 @@ def _():
     import polars as pl
     import plotly.graph_objects as go
     import plotly.express as px
-    from galvani import BioLogic
     import io
     import json
     import re
     import zipfile
-    import tempfile
     import os
-    import uuid
-    import atexit
-    import shutil
     from pathlib import Path
     from datetime import datetime
-    from codegen import generate_python_code
-    import gamry
-    import technique_analysis
+    from echem_core import (
+        load_file_bytes,
+        generate_plot_code,
+        DataStore,
+        calculate_time_average,
+        find_hf_intercept,
+        downsample,
+        TECHNIQUE_MAP,
+        TECHNIQUE_DEFAULTS,
+        session_import,
+        session_export,
+        csv_export,
+        EchemDataset,
+    )
     return (
-        BioLogic,
+        DataStore,
+        EchemDataset,
         Path,
-        atexit,
+        TECHNIQUE_DEFAULTS,
+        calculate_time_average,
+        csv_export,
         datetime,
-        gamry,
-        generate_python_code,
+        find_hf_intercept,
+        generate_plot_code,
         go,
-        io,
-        json,
+        load_file_bytes,
         mo,
         os,
         pl,
         px,
-        re,
-        shutil,
-        technique_analysis,
-        tempfile,
-        uuid,
-        zipfile,
+        session_export,
+        session_import,
     )
 
 
 @app.cell
-def _(atexit, os, pl, shutil, uuid):
-    # Session-based temp storage for DataFrames (avoids large objects in Marimo state)
-    _session_id = str(uuid.uuid4())[:8]
-    session_data_dir = f"/tmp/echem_viewer_{_session_id}"
-    os.makedirs(session_data_dir, exist_ok=True)
-
-    # Clean up temp dir when session ends
-    def _cleanup():
-        if os.path.exists(session_data_dir):
-            shutil.rmtree(session_data_dir, ignore_errors=True)
-    atexit.register(_cleanup)
+def _(DataStore, pl):
+    # Session storage using echem_core DataStore
+    store = DataStore()
 
     def save_df(filename: str, df: pl.DataFrame) -> str:
         """Save DataFrame to temp parquet file, return path."""
         safe_name = filename.replace('/', '_').replace('\\', '_')
-        path = f"{session_data_dir}/{safe_name}.parquet"
+        path = f"{store.storage_dir}/{safe_name}.parquet"
         df.write_parquet(path)
         return path
 
@@ -88,210 +85,36 @@ def _(atexit, os, pl, shutil, uuid):
 
 
 @app.cell
-def _():
-    # Base style dictionary for all EC plots
-    base_style_dict = {
-        'plot_bgcolor': 'rgba(0, 0, 0, 0)',
-        'font': {'family': 'Arial Black', 'size': 16},
-        'xaxis': {
-            'linecolor': 'black',
-            'linewidth': 4,
-            'ticks': 'inside',
-            'tickwidth': 4,
-            'mirror': True,
-            'showline': True,
-            'showgrid': True,
-            'gridcolor': 'lightgray',
-            'gridwidth': 1,
-            'griddash': 'dot',
-        },
-        'yaxis': {
-            'linecolor': 'black',
-            'linewidth': 4,
-            'ticks': 'inside',
-            'tickwidth': 4,
-            'mirror': True,
-            'showline': True,
-            'showgrid': True,
-            'gridcolor': 'lightgray',
-            'gridwidth': 1,
-            'griddash': 'dot',
-        },
-        'legend': {
-            'orientation': 'v',
-            'yanchor': 'top',
-            'y': 1,
-            'xanchor': 'left',
-            'x': 1.02
-        },
-    }
-    return
-
-
-@app.cell
-def _():
-    # Map full technique names from Biologic to abbreviations
-    TECHNIQUE_MAP = {
-        'Chronoamperometry / Chronocoulometry': 'CA',
-        'Chronoamperometry': 'CA',
-        'Chronocoulometry': 'CC',
-        'Chronopotentiometry': 'CP',
-        'Cyclic Voltammetry': 'CV',
-        'Linear Sweep Voltammetry': 'LSV',
-        'Open Circuit Voltage': 'OCV',
-        'Open Circuit Potential': 'OCP',
-        'Potentio Electrochemical Impedance Spectroscopy': 'PEIS',
-        'Galvano Electrochemical Impedance Spectroscopy': 'GEIS',
-        'Impedance Spectroscopy': 'EIS',
-        'Constant Current': 'CC',
-        'Constant Voltage': 'CV',
-        'IR compensation (PEIS)': 'ZIR',
-    }
-    # Default x/y column assignments per technique
-    # Note: ZIR excluded - single-row resistance measurement, handled in Processing section
-    TECHNIQUE_DEFAULTS = {
-        'CV': {'x': 'Ewe/V', 'y': '<I>/mA'},
-        'LSV': {'x': 'Ewe/V', 'y': '<I>/mA'},
-        'CA': {'x': 'time/s', 'y': '<I>/mA'},
-        'CP': {'x': 'time/s', 'y': 'Ewe/V'},
-        'OCV': {'x': 'time/s', 'y': 'Ewe/V'},
-        'OCP': {'x': 'time/s', 'y': 'Ewe/V'},
-        'CC': {'x': 'time/s', 'y': 'Ewe/V'},
-        'PEIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
-        'GEIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
-        'EIS': {'x': 'Re(Z)/Ohm', 'y': 'Im(Z)/Ohm'},
-    }
-    return TECHNIQUE_DEFAULTS, TECHNIQUE_MAP
-
-
-@app.cell
-def _(TECHNIQUE_MAP, re):
-    def extract_technique_from_filename(filename: str) -> str | None:
-        """Extract technique abbreviation from .mpr filename."""
-        base = filename.replace('.mpr', '')
-        base = re.sub(r'_C\d+$', '', base)
-
-        # Multi-scan pattern: _XX_TECHNIQUE at end
-        match = re.search(r'_(\d{2})_([A-Z]+)$', base)
-        if match:
-            technique = match.group(2)
-            if technique in TECHNIQUE_MAP.values():
-                return technique
-
-        # Single scan: technique at start or anywhere
-        for abbrev in TECHNIQUE_MAP.values():
-            if base.startswith(abbrev + '_') or base == abbrev:
-                return abbrev
-
-        parts = base.split('_')
-        for part in parts:
-            if part in TECHNIQUE_MAP.values():
-                return part
-
-        return None
-
-    def extract_label_from_filename(filename: str) -> str:
-        """Extract a clean label from .mpr filename."""
-        base = filename.replace('.mpr', '')
-        label = re.sub(r'_C\d+$', '', base)
-        label = re.sub(r'_\d{2}_[A-Z]+$', '', label)
-        return label
-    return extract_label_from_filename, extract_technique_from_filename
-
-
-@app.cell
-def _(
-    BioLogic,
-    Path,
-    extract_label_from_filename,
-    extract_technique_from_filename,
-    gamry,
-    os,
-    pl,
-    save_df,
-    tempfile,
-):
+def _(Path, load_file_bytes, save_df):
     def process_files_from_dict(files_dict: dict) -> dict:
         """Process a dict of {path: bytes} containing .mpr or .dta files."""
         ec_data = {}
-        print(f"[DEBUG] process_files_from_dict called with {len(files_dict)} files")
-
         for fpath, content in files_dict.items():
             filename = Path(fpath).name
             lower_name = filename.lower()
-            print(f"[DEBUG] Processing: {filename}")
 
             # Skip unsupported file types
             if not (lower_name.endswith('.mpr') or lower_name.endswith('.dta')):
-                print(f"[DEBUG] Skipping unsupported file type: {filename}")
                 continue
 
             try:
-                with tempfile.NamedTemporaryFile(
-                    suffix='.mpr' if lower_name.endswith('.mpr') else '.dta',
-                    delete=False
-                ) as tmp:
-                    tmp.write(content)
-                    tmp_path = tmp.name
+                dataset = load_file_bytes(content, filename)
+                df_path = save_df(filename, dataset.df)
 
-                try:
-                    if lower_name.endswith('.mpr'):
-                        # BioLogic .mpr file
-                        mpr_data = BioLogic.MPRfile(tmp_path)
-                        data_dict = {col: mpr_data.data[col] for col in mpr_data.data.dtype.names}
-                        df = pl.DataFrame(data_dict)
+                ec_data[filename] = {
+                    'path': fpath,
+                    'filename': filename,
+                    'label': dataset.label or filename,
+                    'timestamp': dataset.timestamp.isoformat() if dataset.timestamp else None,
+                    'df_path': df_path,
+                    'columns': dataset.columns,
+                    'technique': dataset.technique,
+                    'source': dataset.source_format,
+                    'cycles': dataset.cycles,
+                }
+            except Exception:
+                pass  # Skip files that fail to parse
 
-                        timestamp = None
-                        if hasattr(mpr_data, 'timestamp') and mpr_data.timestamp:
-                            timestamp = mpr_data.timestamp.isoformat()
-
-                        label = extract_label_from_filename(filename)
-                        technique = extract_technique_from_filename(filename)
-                        source = 'biologic'
-
-                        # Detect cycles from 'cycle number' column if present
-                        cycles = []
-                        if 'cycle number' in df.columns:
-                            cycles = sorted(df['cycle number'].unique().to_list())
-
-                    else:
-                        # Gamry .dta file
-                        df, metadata = gamry.read_gamry_file(tmp_path)
-                        timestamp = None
-                        label = gamry.extract_label_from_filename(filename)
-                        # Try header first, fall back to filename
-                        technique = gamry.detect_technique_from_header(tmp_path) or gamry.detect_technique_from_filename(filename)
-                        source = 'gamry'
-
-                        # Detect cycles from 'cycle number' column (added by read_gamry_file)
-                        cycles = []
-                        if 'cycle number' in df.columns:
-                            cycles = sorted(int(c) for c in df['cycle number'].unique().to_list())
-                        print(f"[DEBUG] Gamry file {filename}: technique={technique}, cycles={cycles}, columns={df.columns}")
-
-                    # Save DataFrame to temp file instead of storing in memory
-                    df_path = save_df(filename, df)
-
-                    ec_data[filename] = {
-                        'path': fpath,
-                        'filename': filename,
-                        'label': label,
-                        'timestamp': timestamp,
-                        'df_path': df_path,  # Path to temp parquet file
-                        'columns': list(df.columns),
-                        'technique': technique,
-                        'source': source,
-                        'cycles': cycles,  # Available cycle numbers
-                    }
-                finally:
-                    os.unlink(tmp_path)
-
-            except Exception as e:
-                print(f"[DEBUG] ERROR processing {filename}: {e}")
-                import traceback
-                traceback.print_exc()
-
-        print(f"[DEBUG] process_files_from_dict returning {len(ec_data)} files: {list(ec_data.keys())}")
         return ec_data
     return (process_files_from_dict,)
 
@@ -330,16 +153,13 @@ def _(mo):
 def _(
     get_ec_data,
     get_processed_files,
-    io,
-    json,
     mpr_upload,
-    pl,
     process_files_from_dict,
     save_df,
+    session_import,
     session_upload,
     set_ec_data,
     set_processed_files,
-    zipfile,
 ):
     # Process uploaded files - adds to existing data instead of replacing
     _current_data = get_ec_data()
@@ -350,57 +170,38 @@ def _(
         # Session import replaces all data
         try:
             zip_bytes = session_upload.value[0].contents
-            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-                metadata = json.loads(zf.read('metadata.json').decode('utf-8'))
-                _new_data = {}  # Clear for session import
-                for file_info in metadata['files']:
-                    parquet_name = file_info['parquet_name']
-                    df = pl.read_parquet(io.BytesIO(zf.read(parquet_name)))
-                    df_path = save_df(file_info['filename'], df)
-
-                    # Detect cycles from loaded data
-                    cycles = []
-                    if 'cycle number' in df.columns:
-                        cycles = sorted(df['cycle number'].unique().to_list())
-
-                    _new_data[file_info['filename']] = {
-                        'path': file_info.get('path', file_info['filename']),
-                        'filename': file_info['filename'],
-                        'label': file_info.get('label', file_info['filename']),
-                        'timestamp': file_info.get('timestamp'),
-                        'df_path': df_path,
-                        'columns': list(df.columns),
-                        'technique': file_info.get('technique'),
-                        'cycles': cycles,
-                    }
-                set_ec_data(_new_data)
-                set_processed_files(set(_new_data.keys()))
+            datasets, _ui_state = session_import(zip_bytes)
+            _new_data = {}
+            for ds in datasets:
+                df_path = save_df(ds.filename, ds.df)
+                _new_data[ds.filename] = {
+                    'path': ds.original_filename or ds.filename,
+                    'filename': ds.filename,
+                    'label': ds.label or ds.filename,
+                    'timestamp': ds.timestamp.isoformat() if ds.timestamp else None,
+                    'df_path': df_path,
+                    'columns': ds.columns,
+                    'technique': ds.technique,
+                    'source': ds.source_format,
+                    'cycles': ds.cycles,
+                }
+            set_ec_data(_new_data)
+            set_processed_files(set(_new_data.keys()))
         except Exception as e:
             print(f"Error importing session: {e}")
 
     elif mpr_upload.value:
         # Add new files (skip already processed)
-        print(f"[DEBUG] Upload triggered with {len(mpr_upload.value)} file(s)")
-        print(f"[DEBUG] Already processed: {_processed}")
-        _files_to_process = {}
-        for f in mpr_upload.value:
-            print(f"[DEBUG] Checking file: {f.name}")
-            if f.name not in _processed:
-                _files_to_process[f.name] = f.contents
-                print(f"[DEBUG] Will process: {f.name}")
-            else:
-                print(f"[DEBUG] Skipping (already processed): {f.name}")
-
+        _files_to_process = {
+            f.name: f.contents
+            for f in mpr_upload.value
+            if f.name not in _processed
+        }
         if _files_to_process:
-            print(f"[DEBUG] Processing {len(_files_to_process)} files...")
             _added = process_files_from_dict(_files_to_process)
-            print(f"[DEBUG] process_files_from_dict returned {len(_added)} files: {list(_added.keys())}")
             _new_data.update(_added)
             set_ec_data(_new_data)
             set_processed_files(_processed | set(_added.keys()))
-            print(f"[DEBUG] State updated. ec_data now has {len(_new_data)} files")
-        else:
-            print("[DEBUG] No new files to process")
 
     # Export current state as ec_data for other cells
     ec_data = get_ec_data()
@@ -569,11 +370,11 @@ def _(
                 if _tech_defaults['y'] in _columns:
                     _y_default = _tech_defaults['y']
 
-            # Fallback to generic defaults
+            # Fallback to generic defaults (using standardized SI column names)
             if _x_default is None:
-                _x_default = 'time/s' if 'time/s' in _columns else _columns[0]
+                _x_default = 'time_s' if 'time_s' in _columns else _columns[0]
             if _y_default is None:
-                for _col in ['<I>/mA', 'I/mA', '<I>/A', 'I/A', 'Ewe/V']:
+                for _col in ['current_A', 'potential_V']:
                     if _col in _columns:
                         _y_default = _col
                         break
@@ -864,16 +665,17 @@ def _(
 @app.cell
 def _(
     active_technique,
+    calculate_time_average,
     chart_batch,
     cycle_selector,
     ec_data,
     file_metadata,
     file_selector,
+    find_hf_intercept,
     go,
     load_df,
     pl,
     px,
-    technique_analysis,
     technique_controls,
 ):
     # Chart figure - rebuilds when values change (uses Scattergl for performance)
@@ -901,27 +703,25 @@ def _(
 
             # Handle PEIS mode - override x/y columns based on plot mode
             _peis_mode = None
-            _negate_y = False  # Flag for Nyquist plot (negate Im(Z) for display)
             if active_technique in ('PEIS', 'GEIS', 'EIS'):
                 _peis_mode = _v.get("peis_mode", "nyquist")
                 if _peis_mode == "nyquist":
-                    _xcol, _ycol = 'Re(Z)/Ohm', 'Im(Z)/Ohm'
-                    _negate_y = True  # Will negate for -Im(Z) display
+                    _xcol, _ycol = 'z_real_Ohm', 'z_imag_Ohm'
                 elif _peis_mode == "bode_mag":
-                    _xcol, _ycol = 'freq/Hz', '|Z|/Ohm'
+                    _xcol, _ycol = 'frequency_Hz', 'z_mag_Ohm'
                 elif _peis_mode == "bode_phase":
-                    _xcol, _ycol = 'freq/Hz', 'Phase(Z)/deg'
+                    _xcol, _ycol = 'frequency_Hz', 'z_phase_deg'
 
             # Calculate analysis results for CA/CP
             if active_technique in ('CA', 'CP') and technique_controls is not None:
                 _tc = technique_controls.value
                 _avg_start = _tc.get("avg_start", 0)
                 _avg_end = _tc.get("avg_end", 100)
-                _avg_col = '<I>/mA' if active_technique == 'CA' else 'Ewe/V'
+                _avg_col = 'current_A' if active_technique == 'CA' else 'potential_V'
                 _averages = {}
                 for _fname in _selected:
                     _df = load_df(ec_data[_fname]['df_path'])
-                    _avg = technique_analysis.calculate_time_average(_df, _avg_col, _avg_start, _avg_end)
+                    _avg = calculate_time_average(_df, _avg_col, _avg_start, _avg_end)
                     if _avg is not None:
                         _averages[_fname] = _avg
                 if _averages:
@@ -934,7 +734,7 @@ def _(
                 _intercepts = {}
                 for _fname in _selected:
                     _df = load_df(ec_data[_fname]['df_path'])
-                    _intercept = technique_analysis.find_hf_intercept(_df)
+                    _intercept = find_hf_intercept(_df)
                     if _intercept is not None:
                         _intercepts[_fname] = _intercept
                 if _intercepts:
@@ -962,13 +762,27 @@ def _(
             def _escape(s):
                 return s.replace('<', '‹').replace('>', '›')
             # Custom axis labels (fallback to escaped column names)
-            # For time columns, update the label to reflect the selected unit
-            _x_label_default = _escape(_xcol)
-            if 'time' in _xcol.lower() and '/s' in _xcol:
-                _x_label_default = _x_label_default.replace('/s', f'/{_time_label_suffix}')
+            # Set axis labels based on technique and mode
+            if _peis_mode == "nyquist":
+                _x_label_default = '|Re(Z)| / Ohm'
+                _y_label_default = '|Im(Z)| / Ohm'
+            elif _peis_mode == "bode_mag":
+                _x_label_default = 'Frequency / Hz'
+                _y_label_default = '|Z| / Ohm'
+            elif _peis_mode == "bode_phase":
+                _x_label_default = 'Frequency / Hz'
+                _y_label_default = 'Phase / deg'
+            elif 'time' in _xcol.lower():
+                # Handle standardized time column (time_s)
+                if _xcol == 'time_s':
+                    _x_label_default = f'Time / {_time_label_suffix}'
+                else:
+                    _x_label_default = _escape(_xcol).replace('_s', f' / {_time_label_suffix}')
+                _y_label_default = _escape(_ycol)
+            else:
+                _x_label_default = _escape(_xcol)
+                _y_label_default = _escape(_ycol)
             _x_label = _v.get("x_label", "") or _x_label_default
-            # For Nyquist, show -Im(Z)/Ohm as the y-axis label
-            _y_label_default = '-Im(Z)/Ohm' if _negate_y else _escape(_ycol)
             _y_label = _v.get("y_label", "") or _y_label_default
 
             # Sort files by timestamp for time_order mode
@@ -1036,9 +850,9 @@ def _(
                 _data = ec_data[_fname]
                 _df = load_df(_data['df_path'])
 
-                # Filter by selected cycles (cast column to int for comparison)
-                if _selected_cycles is not None and 'cycle number' in _df.columns:
-                    _df = _df.filter(pl.col('cycle number').cast(pl.Int64).is_in(_selected_cycles))
+                # Filter by selected cycles
+                if _selected_cycles is not None and 'cycle' in _df.columns:
+                    _df = _df.filter(pl.col('cycle').is_in(_selected_cycles))
 
                 # Get label based on legend_source selection
                 _lbl = _data['label']
@@ -1053,11 +867,14 @@ def _(
                 if _xcol in _df.columns and _ycol in _df.columns:
                     _x_data = _df[_xcol].to_numpy().copy()
                     _y_data = _df[_ycol].to_numpy().copy()
-                    # Negate y values for Nyquist plots (-Im(Z) convention)
-                    # Note: Gamry stores Zimag as negative values, so we negate to get positive -Im(Z)
-                    # If your data appears flipped, the source file may already have -Im(Z) stored
-                    if _negate_y:
-                        _y_data = -_y_data
+
+                    # For EIS techniques, display z columns as absolute values
+                    if active_technique in ('PEIS', 'GEIS', 'EIS'):
+                        import numpy as np
+                        if 'z_' in _xcol:
+                            _x_data = np.abs(_x_data)
+                        if 'z_' in _ycol:
+                            _y_data = np.abs(_y_data)
 
                     # Downsample if too many points (prevents huge plot output)
                     _max_points = 50000
@@ -1317,161 +1134,88 @@ def _(mo):
 
 @app.cell
 def _(
+    EchemDataset,
     chart_batch,
+    csv_export,
     datetime,
     ec_data,
     export_format,
     file_metadata,
     file_selector,
-    generate_python_code,
-    io,
-    json,
+    generate_plot_code,
     load_df,
     mo,
-    pl,
-    zipfile,
+    session_export,
 ):
-    # Export button - changes based on format selection
+    # Export button - includes data and plot code in one zip
     export_button = None
-    export_python_button = None
 
     if ec_data:
-        _zip_buffer = io.BytesIO()
         _timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         _chart_values = chart_batch.value if chart_batch is not None else {}
         _selected_files = list(file_selector.value) if file_selector is not None and file_selector.value else []
+        _is_parquet = export_format.value == "parquet"
+        _ext = ".parquet" if _is_parquet else ".csv"
 
-        if export_format.value == "parquet":
-            # Parquet export with metadata
-            with zipfile.ZipFile(_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as _zf:
-                # Build UI state with full chart settings
-                _ui_state = {
-                    'selected_files': _selected_files,
+        # Build EchemDataset objects from ec_data
+        _datasets = []
+        for _fname, _data in ec_data.items():
+            _meta = file_metadata.get(_fname, {}) if file_metadata else {}
+            _user_meta = {k: v for k, v in _meta.items() if k not in ('filename', 'label', 'technique')}
+            _datasets.append(EchemDataset(
+                filename=_fname,
+                df=load_df(_data['df_path']),
+                columns=_data.get('columns', []),
+                technique=_meta.get('technique') or _data.get('technique'),
+                label=_meta.get('label') or _data.get('label', _fname),
+                timestamp=datetime.fromisoformat(_data['timestamp']) if _data.get('timestamp') else None,
+                cycles=_data.get('cycles', []),
+                source_format=_data.get('source'),
+                original_filename=_data.get('path', _fname),
+                user_metadata=_user_meta,
+            ))
+
+        # Build plot settings
+        _plot_settings = {'selected_files': _selected_files}
+        if _chart_values:
+            _plot_settings['plot_settings'] = {k: _chart_values.get(k) for k in [
+                'x_col', 'y_col', 'plot_type', 'time_unit', 'color_scheme',
+                'line_mode', 'marker_type', 'marker_size', 'trace_linewidth',
+                'axis_linewidth', 'x_scale', 'y_scale', 'show_grid', 'show_legend',
+                'legend_source', 'legend_position', 'legend_fontsize', 'plot_height',
+                'plot_width', 'plot_title', 'x_label', 'y_label', 'title_fontsize',
+                'label_fontsize', 'tick_fontsize', 'stacked_gap', 'hide_y_labels',
+            ]}
+
+        # Generate plot code with correct file paths for chosen format
+        _plot_code = None
+        if _chart_values and _selected_files:
+            _files_for_codegen = [
+                {
+                    "path": f"data/{_fname}{_ext}",
+                    "label": (file_metadata.get(_fname, {}) if file_metadata else {}).get(
+                        'label', _fname.replace('.mpr', '').replace('.dta', ''))
                 }
-                if _chart_values:
-                    _ui_state['plot_settings'] = {
-                        'x_column': _chart_values.get("x_col"),
-                        'y_column': _chart_values.get("y_col"),
-                        'plot_type': _chart_values.get("plot_type"),
-                        'time_unit': _chart_values.get("time_unit"),
-                        'color_scheme': _chart_values.get("color_scheme"),
-                        'line_mode': _chart_values.get("line_mode"),
-                        'marker_type': _chart_values.get("marker_type"),
-                        'marker_size': _chart_values.get("marker_size"),
-                        'trace_linewidth': _chart_values.get("trace_linewidth"),
-                        'axis_linewidth': _chart_values.get("axis_linewidth"),
-                        'x_scale': _chart_values.get("x_scale"),
-                        'y_scale': _chart_values.get("y_scale"),
-                        'show_grid': _chart_values.get("show_grid"),
-                        'show_legend': _chart_values.get("show_legend"),
-                        'legend_source': _chart_values.get("legend_source"),
-                        'legend_position': _chart_values.get("legend_position"),
-                        'legend_fontsize': _chart_values.get("legend_fontsize"),
-                        'plot_height': _chart_values.get("plot_height"),
-                        'plot_width': _chart_values.get("plot_width"),
-                        'plot_title': _chart_values.get("plot_title"),
-                        'x_label': _chart_values.get("x_label"),
-                        'y_label': _chart_values.get("y_label"),
-                        'title_fontsize': _chart_values.get("title_fontsize"),
-                        'label_fontsize': _chart_values.get("label_fontsize"),
-                        'tick_fontsize': _chart_values.get("tick_fontsize"),
-                        'stacked_gap': _chart_values.get("stacked_gap"),
-                        'hide_y_labels': _chart_values.get("hide_y_labels"),
-                    }
+                for _fname in _selected_files
+            ]
+            _plot_code = generate_plot_code(_chart_values, _files_for_codegen)
 
-                _metadata = {
-                    'exported_at': datetime.now().isoformat(),
-                    'files': [],
-                    'ui_state': _ui_state,
-                }
-
-                for _fname, _data in ec_data.items():
-                    _parquet_name = _fname.replace('.mpr', '.parquet')
-                    _parquet_buf = io.BytesIO()
-                    load_df(_data['df_path']).write_parquet(_parquet_buf)
-                    _zf.writestr(_parquet_name, _parquet_buf.getvalue())
-
-                    # Build file metadata entry, merging ec_data defaults with edited file_metadata
-                    _file_entry = {
-                        'filename': _fname,
-                        'parquet_name': _parquet_name,
-                        'path': _data.get('path', _fname),
-                        'label': _data.get('label', _fname),
-                        'timestamp': _data.get('timestamp'),
-                        'technique': _data.get('technique'),
-                    }
-                    # Add any custom columns from file_metadata editor
-                    if file_metadata and _fname in file_metadata:
-                        for _key, _val in file_metadata[_fname].items():
-                            if _key not in _file_entry:
-                                _file_entry[_key] = _val
-                    _metadata['files'].append(_file_entry)
-
-                _zf.writestr('metadata.json', json.dumps(_metadata, indent=2))
-
+        # Export with data and plot code
+        if _is_parquet:
+            _zip_bytes = session_export(_datasets, plot_settings=_plot_settings, plot_code=_plot_code)
             export_button = mo.download(
-                data=_zip_buffer.getvalue(),
+                data=_zip_bytes,
                 filename=f"echem_session_{_timestamp}.zip",
                 label="Export Data"
             )
         else:
-            # CSV export with metadata.csv
-            with zipfile.ZipFile(_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as _zf:
-                # Export data files
-                for _fname, _data in ec_data.items():
-                    _csv_name = _fname.replace('.mpr', '.csv')
-                    _csv_content = load_df(_data['df_path']).write_csv()
-                    _zf.writestr(_csv_name, _csv_content)
-
-                # Export metadata.csv with all file metadata
-                _meta_rows = []
-                for _fname, _data in ec_data.items():
-                    _row = {
-                        'filename': _fname,
-                        'label': _data.get('label', _fname),
-                        'technique': _data.get('technique', ''),
-                        'timestamp': _data.get('timestamp', ''),
-                    }
-                    # Add any custom columns from file_metadata editor
-                    if file_metadata and _fname in file_metadata:
-                        for _key, _val in file_metadata[_fname].items():
-                            if _key not in _row:
-                                _row[_key] = _val if _val is not None else ''
-                    _meta_rows.append(_row)
-
-                if _meta_rows:
-                    _meta_df = pl.DataFrame(_meta_rows)
-                    _zf.writestr('metadata.csv', _meta_df.write_csv())
-
-                # Include plot_settings.json for CSV export too
-                if _chart_values:
-                    _settings = {
-                        'selected_files': _selected_files,
-                        'plot_settings': {
-                            'x_column': _chart_values.get("x_col"),
-                            'y_column': _chart_values.get("y_col"),
-                            'plot_type': _chart_values.get("plot_type"),
-                            'color_scheme': _chart_values.get("color_scheme"),
-                            'line_mode': _chart_values.get("line_mode"),
-                        }
-                    }
-                    _zf.writestr('plot_settings.json', json.dumps(_settings, indent=2))
-
+            _zip_bytes = csv_export(_datasets, plot_settings=_plot_settings, plot_code=_plot_code)
             export_button = mo.download(
-                data=_zip_buffer.getvalue(),
+                data=_zip_bytes,
                 filename=f"echem_csv_{_timestamp}.zip",
                 label="Export Data"
             )
-
-        # Generate Python code export button
-        if _chart_values and _selected_files:
-            _python_code = generate_python_code(_chart_values, _selected_files, file_metadata)
-            export_python_button = mo.download(
-                data=_python_code.encode('utf-8'),
-                filename=f"echem_plot_{_timestamp}.py",
-                label="Export Plot Code"
-            )
-    return export_button, export_python_button
+    return (export_button,)
 
 
 @app.cell
@@ -1480,7 +1224,6 @@ def _(
     downsample_warning,
     export_button,
     export_format,
-    export_python_button,
     metadata_editor,
     mo,
     mpr_upload,
@@ -1498,12 +1241,9 @@ def _(
 
     # Build export section content
     if export_button is not None:
-        _export_buttons = [export_button]
-        if export_python_button is not None:
-            _export_buttons.append(export_python_button)
         _export_content = mo.vstack([
             export_format,
-            mo.hstack(_export_buttons, justify="start", gap=2),
+            export_button,
         ], gap=2)
     else:
         _export_content = mo.md("*Upload data to enable export*")

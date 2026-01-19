@@ -9,7 +9,7 @@ and for integration with multi-technique analysis pipelines.
 __version__ = "0.1.0"
 
 # Types
-from .types import EchemDataset
+from .types import EchemDataset, TECHNIQUE_MAP, TECHNIQUE_DEFAULTS
 
 # Parsers
 from .parsers import load_file, load_file_bytes
@@ -31,7 +31,7 @@ from .analysis import (
 from .storage import DataStore
 
 # Export/Import
-from .export import session_export, session_import
+from .export import session_export, session_import, csv_export
 
 # Code generation
 from .codegen import generate_plot_code
@@ -51,6 +51,8 @@ from .transforms import (
 __all__ = [
     "__version__",
     "EchemDataset",
+    "TECHNIQUE_MAP",
+    "TECHNIQUE_DEFAULTS",
     # Parsers
     "load_file",
     "load_file_bytes",
@@ -69,6 +71,7 @@ __all__ = [
     # Export
     "session_export",
     "session_import",
+    "csv_export",
     # Codegen
     "generate_plot_code",
     # Transforms
