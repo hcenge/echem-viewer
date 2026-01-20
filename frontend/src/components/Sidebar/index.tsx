@@ -80,7 +80,7 @@ export function Sidebar({
   ];
 
   return (
-    <Box sx={{ width: 280, flexShrink: 0 }}>
+    <Box>
       {/* Axes Section */}
       <SettingSection title="Axes">
         <SettingSelect

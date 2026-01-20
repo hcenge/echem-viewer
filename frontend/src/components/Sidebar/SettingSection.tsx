@@ -11,7 +11,7 @@ interface SettingSectionProps {
 export function SettingSection({
   title,
   children,
-  defaultExpanded = true,
+  defaultExpanded = false,
 }: SettingSectionProps) {
   return (
     <Accordion defaultExpanded={defaultExpanded}>

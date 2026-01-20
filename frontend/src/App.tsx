@@ -700,8 +700,8 @@ function App() {
                 onTechniqueChange={handleTechniqueChange}
               />
               <Box sx={{ display: 'flex', gap: 2 }}>
-                {/* Left column: PlotsList + ExportPanel */}
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, width: 200, flexShrink: 0 }}>
+                {/* Left column: PlotsList + ExportPanel + Sidebar */}
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, width: 280, flexShrink: 0 }}>
                   <PlotsList
                     plots={plots}
                     activePlotId={activePlotId}
@@ -717,13 +717,13 @@ function App() {
                     plots={plots}
                     onExport={handleExport}
                   />
+                  <Sidebar
+                    settings={chartSettings}
+                    onSettingsChange={handleSettingsChange}
+                    availableColumns={availableColumns}
+                    customColumns={customColumns}
+                  />
                 </Box>
-                <Sidebar
-                  settings={chartSettings}
-                  onSettingsChange={handleSettingsChange}
-                  availableColumns={availableColumns}
-                  customColumns={customColumns}
-                />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Chart
                     files={filteredFiles}
