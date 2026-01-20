@@ -1,6 +1,6 @@
 # Echem-Viewer
 
-Electrochemistry data visualization tool built with Marimo.
+Electrochemistry data visualization tool built with Python and React.
 
 ## File Structure
 
