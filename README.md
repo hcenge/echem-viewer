@@ -15,15 +15,3 @@ Electrochemistry data visualization tool built with Python and React.
 
 - **BioLogic .mpr** - via galvani library
 - **Gamry .dta** - via custom parser
-
-## Running
-
-```bash
-marimo run app.py
-```
-
-## Development
-
-```bash
-marimo edit app.py
-```
