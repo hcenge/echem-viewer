@@ -7,6 +7,7 @@ interface FileTableHeaderProps {
   onSelectAll: (checked: boolean) => void;
   showCyclesColumn: boolean;
   showExtendedColumns: boolean;
+  analysisColumnNames: string[];
   customColumnNames: string[];
   onCustomColumnRename: (oldName: string, newName: string) => void;
   onCustomColumnDelete: (name: string) => void;
@@ -18,6 +19,7 @@ export function FileTableHeader({
   onSelectAll,
   showCyclesColumn,
   showExtendedColumns,
+  analysisColumnNames,
   customColumnNames,
   onCustomColumnRename,
   onCustomColumnDelete,
@@ -35,6 +37,12 @@ export function FileTableHeader({
         <TableCell>Filename</TableCell>
         <TableCell>Label</TableCell>
         <TableCell>Technique</TableCell>
+        {/* Analysis columns (populated when user runs analysis) */}
+        {analysisColumnNames.map((col) => (
+          <TableCell key={`analysis-${col}`} sx={{ fontStyle: 'italic', opacity: 0.85 }}>
+            {col}
+          </TableCell>
+        ))}
         {showCyclesColumn && <TableCell>Cycles</TableCell>}
         {showExtendedColumns && (
           <>

@@ -48,6 +48,17 @@ export function FileTable({
     )
   );
 
+  // Get all analysis column names from all files
+  const analysisColumnNames = useMemo(() => {
+    const names = new Set<string>();
+    files.forEach((f) => {
+      if (f.analysis) {
+        Object.keys(f.analysis).forEach((key) => names.add(key));
+      }
+    });
+    return Array.from(names);
+  }, [files]);
+
   // Check if any file has cycles (to show the column)
   const hasCycleFiles = files.some((f) => f.cycles && f.cycles.length > 0);
 
@@ -112,6 +123,7 @@ export function FileTable({
             onSelectAll={handleSelectAll}
             showCyclesColumn={hasCycleFiles}
             showExtendedColumns={showExtendedColumns}
+            analysisColumnNames={analysisColumnNames}
             customColumnNames={customColumnNames}
             onCustomColumnRename={onCustomColumnRename || (() => {})}
             onCustomColumnDelete={onCustomColumnDelete || (() => {})}
@@ -128,6 +140,7 @@ export function FileTable({
                 selectedCycles={selectedCycles[file.filename] || file.cycles || []}
                 onCyclesChange={(cycles) => onCyclesChange?.(file.filename, cycles)}
                 showExtendedColumns={showExtendedColumns}
+                analysisColumnNames={analysisColumnNames}
                 customColumnNames={customColumnNames}
                 customColumnValues={customColumns[file.filename] || {}}
                 onCustomCellChange={(col, value) => onCustomCellChange?.(file.filename, col, value)}

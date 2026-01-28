@@ -62,6 +62,7 @@ function App() {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [customColumns, setCustomColumns] = useState<Record<string, Record<string, unknown>>>({});
   const [techniqueDefaults, setTechniqueDefaults] = useState<Record<string, { x: string; y: string }>>({});
   const [activeTechnique, setActiveTechnique] = useState<string | 'all'>('all');
@@ -124,21 +125,33 @@ function App() {
 
   // Handle file upload
   const handleUpload = async (filesToUpload: File[]) => {
-    const response = await uploadFiles(filesToUpload);
-    await refreshFiles();
+    try {
+      const response = await uploadFiles(filesToUpload);
 
-    // Restore plots if importing a session
-    if (response.plots && response.plots.length > 0) {
-      const restoredPlots: PlotConfig[] = response.plots.map((p: PlotConfigExport) => ({
-        id: p.id || generateId(),
-        name: p.name,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        selectedFiles: p.selected_files,
-        selectedCycles: p.selected_cycles || {},
-        settings: p.settings as unknown as ChartSettings,
-      }));
-      setPlots((prev) => [...prev, ...restoredPlots]);
+      // Show any upload errors (partial failures)
+      if (response.errors && response.errors.length > 0) {
+        setUploadErrors(response.errors);
+      }
+
+      // Refresh file list to show newly uploaded files
+      await refreshFiles();
+
+      // Restore plots if importing a session
+      if (response.plots && response.plots.length > 0) {
+        const restoredPlots: PlotConfig[] = response.plots.map((p: PlotConfigExport) => ({
+          id: p.id || generateId(),
+          name: p.name,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          selectedFiles: p.selected_files,
+          selectedCycles: p.selected_cycles || {},
+          settings: p.settings as unknown as ChartSettings,
+        }));
+        setPlots((prev) => [...prev, ...restoredPlots]);
+      }
+    } catch {
+      // uploadFiles already sets the error state, just refresh to show any partial uploads
+      await refreshFiles();
     }
   };
 
@@ -409,6 +422,27 @@ function App() {
       }
     },
     [files, updateMetadata]
+  );
+
+  // Handle analysis completion - update files with analysis results
+  const handleAnalysisComplete = useCallback(
+    (results: Record<string, Record<string, number>>) => {
+      setFiles((prevFiles) =>
+        prevFiles.map((file) => {
+          if (results[file.filename]) {
+            return {
+              ...file,
+              analysis: {
+                ...file.analysis,
+                ...results[file.filename],
+              },
+            };
+          }
+          return file;
+        })
+      );
+    },
+    []
   );
 
   // ============== Plot Management ==============
@@ -757,6 +791,7 @@ function App() {
                       technique={activeTechnique}
                       selectedFiles={selectedFiles}
                       onCopyToTable={handleCopyAnalysisToTable}
+                      onAnalysisComplete={handleAnalysisComplete}
                     />
                   )}
                 </Box>
@@ -799,6 +834,27 @@ function App() {
         <Snackbar open={!!error} autoHideDuration={6000} onClose={clearError}>
           <Alert onClose={clearError} severity="error" sx={{ width: '100%' }}>
             {error}
+          </Alert>
+        </Snackbar>
+
+        {/* Upload Errors Snackbar */}
+        <Snackbar
+          open={uploadErrors.length > 0}
+          autoHideDuration={10000}
+          onClose={() => setUploadErrors([])}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert
+            onClose={() => setUploadErrors([])}
+            severity="warning"
+            sx={{ width: '100%', maxWidth: 600 }}
+          >
+            <strong>Some files failed to upload:</strong>
+            <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
+              {uploadErrors.map((err, i) => (
+                <li key={i}>{err}</li>
+              ))}
+            </ul>
           </Alert>
         </Snackbar>
       </Box>

@@ -17,6 +17,11 @@ import type {
 // Use relative URL in production, localhost in development
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8000' : '';
 
+// Common fetch options for all requests (credentials needed for session cookies)
+const fetchOptions: RequestInit = {
+  credentials: 'include',
+};
+
 export function useApi() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +37,7 @@ export function useApi() {
       files.forEach((file) => formData.append('files', file));
 
       const response = await fetch(`${API_BASE}/upload`, {
+        ...fetchOptions,
         method: 'POST',
         body: formData,
       });
@@ -56,7 +62,7 @@ export function useApi() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${API_BASE}/files`);
+      const response = await fetch(`${API_BASE}/files`, fetchOptions);
       if (!response.ok) {
         throw new Error('Failed to fetch files');
       }
@@ -76,6 +82,7 @@ export function useApi() {
     setError(null);
     try {
       const response = await fetch(`${API_BASE}/files/${encodeURIComponent(filename)}`, {
+        ...fetchOptions,
         method: 'DELETE',
       });
       if (!response.ok) {
@@ -96,6 +103,7 @@ export function useApi() {
     setError(null);
     try {
       const response = await fetch(`${API_BASE}/files/${encodeURIComponent(filename)}/metadata`, {
+        ...fetchOptions,
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -118,6 +126,7 @@ export function useApi() {
     setError(null);
     try {
       const response = await fetch(`${API_BASE}/data/${encodeURIComponent(filename)}`, {
+        ...fetchOptions,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
@@ -140,7 +149,7 @@ export function useApi() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${API_BASE}/techniques`);
+      const response = await fetch(`${API_BASE}/techniques`, fetchOptions);
       if (!response.ok) {
         throw new Error('Failed to fetch techniques');
       }
@@ -160,6 +169,7 @@ export function useApi() {
     setError(null);
     try {
       const response = await fetch(`${API_BASE}/export`, {
+        ...fetchOptions,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
@@ -179,7 +189,7 @@ export function useApi() {
 
   // Get session stats
   const getStats = useCallback(async (): Promise<SessionStats> => {
-    const response = await fetch(`${API_BASE}/stats`);
+    const response = await fetch(`${API_BASE}/stats`, fetchOptions);
     if (!response.ok) {
       throw new Error('Failed to fetch stats');
     }

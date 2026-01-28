@@ -12,6 +12,7 @@ interface FileRowProps {
   selectedCycles: number[];
   onCyclesChange: (cycles: number[]) => void;
   showExtendedColumns: boolean;
+  analysisColumnNames: string[];
   customColumnNames: string[];
   customColumnValues: Record<string, unknown>;
   onCustomCellChange: (columnName: string, value: string) => void;
@@ -26,6 +27,7 @@ export function FileRow({
   selectedCycles,
   onCyclesChange,
   showExtendedColumns,
+  analysisColumnNames,
   customColumnNames,
   customColumnValues,
   onCustomCellChange,
@@ -54,6 +56,16 @@ export function FileRow({
       <TableCell>
         {file.technique && <Chip label={file.technique} size="small" />}
       </TableCell>
+
+      {/* Analysis columns (populated when user runs analysis) */}
+      {analysisColumnNames.map((col) => {
+        const value = file.analysis?.[col];
+        return (
+          <TableCell key={`analysis-${col}`} sx={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>
+            {value !== undefined ? (typeof value === 'number' ? value.toFixed(4) : String(value)) : '-'}
+          </TableCell>
+        );
+      })}
 
       {showCyclesColumn && (
         <TableCell>

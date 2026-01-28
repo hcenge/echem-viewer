@@ -19,9 +19,10 @@ interface AnalysisPanelProps {
   technique: string;
   selectedFiles: string[];
   onCopyToTable?: (columnName: string, values: Record<string, string>) => void;
+  onAnalysisComplete?: (results: Record<string, Record<string, number>>) => void;
 }
 
-export function AnalysisPanel({ technique, selectedFiles, onCopyToTable }: AnalysisPanelProps) {
+export function AnalysisPanel({ technique, selectedFiles, onCopyToTable, onAnalysisComplete }: AnalysisPanelProps) {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<AnalysisResultData | null>(null);
   const [expanded, setExpanded] = useState(true);
@@ -34,6 +35,7 @@ export function AnalysisPanel({ technique, selectedFiles, onCopyToTable }: Analy
       try {
         const response = await fetch(`${API_BASE}/analysis/${technique}`, {
           method: 'POST',
+          credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             files: selectedFiles,
@@ -47,6 +49,11 @@ export function AnalysisPanel({ technique, selectedFiles, onCopyToTable }: Analy
 
         const data = await response.json();
         setResults(data);
+
+        // Notify parent of analysis results to update file table
+        if (onAnalysisComplete && data.results) {
+          onAnalysisComplete(data.results);
+        }
       } catch (error) {
         console.error('Analysis error:', error);
         setResults(null);
@@ -54,7 +61,7 @@ export function AnalysisPanel({ technique, selectedFiles, onCopyToTable }: Analy
         setLoading(false);
       }
     },
-    [technique, selectedFiles]
+    [technique, selectedFiles, onAnalysisComplete]
   );
 
   // Check if technique has analysis

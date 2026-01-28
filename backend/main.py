@@ -1,12 +1,14 @@
-"""FastAPI backend for echem-viewer."""
+"""FastAPI backend for echem-viewer with multi-user session support."""
 
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 # Add parent directory to path for echem_core import
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Cookie, Request, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,10 +35,35 @@ from echem_core import (
     current_at_potential,
     steady_state_potential,
 )
-from state import state, MAX_FILES, MAX_FILE_SIZE_MB
+from state import (
+    session_manager,
+    SessionState,
+    MAX_FILES,
+    MAX_FILE_SIZE_MB,
+    MAX_MEMORY_PER_SESSION_MB,
+    SESSION_TTL_HOURS,
+)
+
+# Cookie settings
+SESSION_COOKIE_NAME = "echem_session_id"
+SESSION_COOKIE_MAX_AGE = SESSION_TTL_HOURS * 60 * 60  # Convert to seconds
 
 
-app = FastAPI(title="Echem Viewer API")
+# ============== Lifespan (startup/shutdown) ==============
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan - start/stop background cleanup task."""
+    # Startup: start the cleanup background task
+    await session_manager.start_cleanup_task()
+    print(f"[Startup] Session cleanup task started (interval: 30 min, TTL: {SESSION_TTL_HOURS}h)")
+    yield
+    # Shutdown: stop the cleanup task
+    await session_manager.stop_cleanup_task()
+    print("[Shutdown] Session cleanup task stopped")
+
+
+app = FastAPI(title="Echem Viewer API", lifespan=lifespan)
 
 # CORS for local development and production
 app.add_middleware(
@@ -52,6 +79,30 @@ app.add_middleware(
 )
 
 
+# ============== Session Dependency ==============
+
+def get_session(
+    request: Request,
+    response: Response,
+    echem_session_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> SessionState:
+    """Get or create session from cookie. Sets cookie if new session created."""
+    session_id, session = session_manager.get_or_create_session(echem_session_id)
+
+    # Set/refresh the session cookie if it's new or needs refreshing
+    if session_id != echem_session_id:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_id,
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=False,  # Set to True in production with HTTPS
+        )
+
+    return session
+
+
 # ============== Pydantic Models ==============
 
 class FileInfo(BaseModel):
@@ -64,6 +115,7 @@ class FileInfo(BaseModel):
     cycles: list[int]
     columns: list[str]
     custom: dict = {}  # Custom column values for this file
+    analysis: dict = {}  # Pre-computed analysis results (e.g., EIS intercepts)
 
 
 class MetadataUpdate(BaseModel):
@@ -91,6 +143,7 @@ class UploadResponse(BaseModel):
     """Response from file upload."""
     files: list[FileInfo]
     plots: list[dict] | None = None  # Restored plots from session import
+    errors: list[str] = []  # Files that failed to upload with error messages
 
 
 class PlotConfigExport(BaseModel):
@@ -128,29 +181,36 @@ class AnalysisRequest(BaseModel):
 @app.get("/api/health")
 def health():
     """Health check."""
-    return {"status": "ok", "files_loaded": len(state.datasets)}
+    stats = session_manager.get_stats()
+    return {"status": "ok", **stats}
 
 
 @app.get("/stats")
-def get_stats():
+def get_stats(session: SessionState = Depends(get_session)):
     """Get session statistics for monitoring."""
     return {
-        "file_count": state.file_count,
+        "file_count": session.file_count,
         "max_files": MAX_FILES,
-        "files_remaining": state.files_remaining(),
-        "memory_mb": round(state.get_memory_estimate_mb(), 2),
+        "files_remaining": session.files_remaining(),
+        "memory_mb": round(session.get_memory_estimate_mb(), 2),
+        "max_memory_mb": MAX_MEMORY_PER_SESSION_MB,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "session_id": session.session_id[:8],  # Show partial ID for debugging
     }
 
 
 @app.post("/upload")
-async def upload_files(files: list[UploadFile]) -> UploadResponse:
-    """Upload .mpr, .dta, or .zip files."""
+async def upload_files(
+    files: list[UploadFile],
+    session: SessionState = Depends(get_session),
+) -> UploadResponse:
+    """Upload .mpr, .dta, or .zip files. Continues on individual file failures."""
     added = []
+    errors = []
     restored_plots = None
 
     # Check file count limit
-    remaining = state.files_remaining()
+    remaining = session.files_remaining()
     if remaining == 0:
         raise HTTPException(
             status_code=400,
@@ -159,8 +219,9 @@ async def upload_files(files: list[UploadFile]) -> UploadResponse:
 
     for file in files:
         # Check if we've hit the limit during this upload batch
-        if not state.can_add_files:
-            break
+        if not session.can_add_files:
+            errors.append(f"{file.filename}: File limit reached")
+            continue
 
         content = await file.read()
         filename = file.filename or "unknown"
@@ -168,57 +229,74 @@ async def upload_files(files: list[UploadFile]) -> UploadResponse:
         # Check file size
         file_size_mb = len(content) / (1024 * 1024)
         if file_size_mb > MAX_FILE_SIZE_MB:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File {filename} is too large ({file_size_mb:.1f}MB). Max size is {MAX_FILE_SIZE_MB}MB."
-            )
+            errors.append(f"{filename}: Too large ({file_size_mb:.1f}MB, max {MAX_FILE_SIZE_MB}MB)")
+            continue
 
         # Validate extension
         ext = Path(filename).suffix.lower()
         if ext not in (".mpr", ".dta", ".zip"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type: {ext}. Accepted: .mpr, .dta, .zip"
-            )
+            errors.append(f"{filename}: Invalid file type {ext}")
+            continue
 
         try:
             if ext == ".zip":
                 # Session import (returns datasets, ui_state, plots_config, file_metadata)
                 datasets, ui_state, plots_config, imported_metadata = session_import(content)
+
+                # Check memory limit for all datasets
+                total_new_memory = sum(
+                    ds.df.estimated_size() / (1024 * 1024)
+                    for ds in datasets if ds.df is not None
+                )
+                if not session.can_add_memory(total_new_memory):
+                    errors.append(
+                        f"{filename}: Would exceed memory limit "
+                        f"(need {total_new_memory:.1f}MB, have {MAX_MEMORY_PER_SESSION_MB - session.get_memory_estimate_mb():.1f}MB free)"
+                    )
+                    continue
+
                 for ds in datasets:
-                    if not state.can_add_files:
+                    if not session.can_add_files:
                         break
-                    state.add_dataset(ds)
+                    session.add_dataset(ds)
                     added.append(_dataset_to_file_info(ds))
                     # Restore file metadata (custom columns, labels)
                     if imported_metadata and ds.filename in imported_metadata:
-                        state.update_metadata(ds.filename, imported_metadata[ds.filename])
+                        session.update_metadata(ds.filename, imported_metadata[ds.filename])
                 # Return plots config for frontend to restore
                 if plots_config:
                     restored_plots = plots_config
             else:
                 # Parse raw data file
                 ds = load_file_bytes(content, filename)
-                state.add_dataset(ds)
+
+                # Check memory limit
+                new_memory = ds.df.estimated_size() / (1024 * 1024) if ds.df is not None else 0
+                if not session.can_add_memory(new_memory):
+                    errors.append(
+                        f"{filename}: Would exceed memory limit "
+                        f"(need {new_memory:.1f}MB, have {MAX_MEMORY_PER_SESSION_MB - session.get_memory_estimate_mb():.1f}MB free)"
+                    )
+                    continue
+
+                session.add_dataset(ds)
                 added.append(_dataset_to_file_info(ds))
         except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to parse {filename}: {str(e)}"
-            )
+            errors.append(f"{filename}: {str(e)}")
+            continue
 
-    return UploadResponse(files=added, plots=restored_plots)
+    return UploadResponse(files=added, plots=restored_plots, errors=errors)
 
 
 @app.get("/files")
-def list_files() -> list[FileInfo]:
+def list_files(session: SessionState = Depends(get_session)) -> list[FileInfo]:
     """List all loaded files with metadata."""
     result = []
-    for filename, ds in state.datasets.items():
+    for filename, ds in session.datasets.items():
         info = _dataset_to_file_info(ds)
         # Merge user-edited metadata
-        if filename in state.file_metadata:
-            meta = state.file_metadata[filename]
+        if filename in session.file_metadata:
+            meta = session.file_metadata[filename]
             info.label = meta.get("label", info.label)
             # Extract custom columns (everything except 'label')
             info.custom = {k: v for k, v in meta.items() if k != "label"}
@@ -227,18 +305,22 @@ def list_files() -> list[FileInfo]:
 
 
 @app.delete("/files/{filename}")
-def delete_file(filename: str):
+def delete_file(filename: str, session: SessionState = Depends(get_session)):
     """Remove a file from the session."""
-    if filename not in state.datasets:
+    if filename not in session.datasets:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-    state.remove_dataset(filename)
+    session.remove_dataset(filename)
     return {"status": "deleted", "filename": filename}
 
 
 @app.patch("/files/{filename}/metadata")
-def update_file_metadata(filename: str, updates: MetadataUpdate):
+def update_file_metadata(
+    filename: str,
+    updates: MetadataUpdate,
+    session: SessionState = Depends(get_session),
+):
     """Update editable metadata for a file."""
-    if filename not in state.datasets:
+    if filename not in session.datasets:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
     update_dict = {}
@@ -247,17 +329,21 @@ def update_file_metadata(filename: str, updates: MetadataUpdate):
     if updates.custom is not None:
         update_dict.update(updates.custom)
 
-    state.update_metadata(filename, update_dict)
+    session.update_metadata(filename, update_dict)
     return {"status": "updated", "filename": filename}
 
 
 @app.post("/data/{filename}")
-def get_file_data(filename: str, request: DataRequest) -> DataResponse:
+def get_file_data(
+    filename: str,
+    request: DataRequest,
+    session: SessionState = Depends(get_session),
+) -> DataResponse:
     """Get display-ready x/y data for a file."""
-    if filename not in state.datasets:
+    if filename not in session.datasets:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-    ds = state.datasets[filename]
+    ds = session.datasets[filename]
     df = ds.df
 
     # Filter by cycles if specified
@@ -287,10 +373,10 @@ def get_file_data(filename: str, request: DataRequest) -> DataResponse:
 
 
 @app.get("/techniques")
-def get_techniques() -> dict:
+def get_techniques(session: SessionState = Depends(get_session)) -> dict:
     """Get techniques present in loaded data and their defaults."""
     techniques = set()
-    for ds in state.datasets.values():
+    for ds in session.datasets.values():
         if ds.technique:
             techniques.add(ds.technique)
 
@@ -301,7 +387,11 @@ def get_techniques() -> dict:
 
 
 @app.post("/analysis/{technique}")
-def run_analysis(technique: str, request: AnalysisRequest) -> dict:
+def run_analysis(
+    technique: str,
+    request: AnalysisRequest,
+    session: SessionState = Depends(get_session),
+) -> dict:
     """Run technique-specific analysis on selected files.
 
     Returns a dict mapping filename -> analysis results.
@@ -309,10 +399,10 @@ def run_analysis(technique: str, request: AnalysisRequest) -> dict:
     results = {}
 
     for filename in request.files:
-        if filename not in state.datasets:
+        if filename not in session.datasets:
             continue
 
-        ds = state.datasets[filename]
+        ds = session.datasets[filename]
         df = ds.df
         file_results = {}
 
@@ -400,14 +490,17 @@ def run_analysis(technique: str, request: AnalysisRequest) -> dict:
 
 
 @app.post("/export")
-def export_session(request: ExportRequest):
+def export_session(
+    request: ExportRequest,
+    session: SessionState = Depends(get_session),
+):
     """Export selected files as zip."""
     # Get selected datasets
     datasets = []
     for filename in request.files:
-        if filename not in state.datasets:
+        if filename not in session.datasets:
             raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-        datasets.append(state.datasets[filename])
+        datasets.append(session.datasets[filename])
 
     if not datasets:
         raise HTTPException(status_code=400, detail="No files selected for export")
@@ -416,7 +509,7 @@ def export_session(request: ExportRequest):
     file_metadata = request.file_metadata or {}
     for fname in request.files:
         if fname not in file_metadata:
-            file_metadata[fname] = state.file_metadata.get(fname, {})
+            file_metadata[fname] = session.file_metadata.get(fname, {})
 
     # Generate plot codes (one per plot if multi-plot, or single code for legacy)
     plot_codes = {}
@@ -505,6 +598,7 @@ def _dataset_to_file_info(ds: EchemDataset) -> FileInfo:
         source=ds.source_format,
         cycles=ds.cycles,
         columns=ds.columns,
+        analysis={},  # Analysis is done on-demand via /analysis endpoint
     )
 
 

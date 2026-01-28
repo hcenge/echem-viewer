@@ -26,6 +26,10 @@ def find_hf_intercept(df: pl.DataFrame) -> float | None:
     re_z = df["z_real_Ohm"].to_numpy()
     im_z = df["z_imag_Ohm"].to_numpy()
 
+    # Check for empty data
+    if len(re_z) == 0 or len(im_z) == 0:
+        return None
+
     # For Nyquist plots, we typically plot -Im(Z) vs Re(Z)
     # The HF intercept is where -Im(Z) = 0, which means Im(Z) = 0
     neg_im_z = -im_z
@@ -71,6 +75,10 @@ def find_lf_intercept(df: pl.DataFrame) -> float | None:
 
     re_z = df["z_real_Ohm"].to_numpy()
     im_z = df["z_imag_Ohm"].to_numpy()
+
+    # Check for empty data
+    if len(re_z) == 0 or len(im_z) == 0:
+        return None
 
     neg_im_z = -im_z
 

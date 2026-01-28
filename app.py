@@ -37,6 +37,7 @@ def _():
         DataStore,
         calculate_time_average,
         find_hf_intercept,
+        ir_compensate,
         downsample,
         TECHNIQUE_MAP,
         TECHNIQUE_DEFAULTS,
@@ -56,6 +57,7 @@ def _():
         find_hf_intercept,
         generate_plot_code,
         go,
+        ir_compensate,
         load_file_bytes,
         mo,
         os,
@@ -238,6 +240,51 @@ def _(ec_data, file_metadata):
 
 
 @app.cell
+def _(ec_data, files_by_technique, find_hf_intercept, load_df, mo):
+    # iR Correction controls - select PEIS file and apply correction
+    ir_correction_controls = None
+    ir_r_values = {}  # Store R values from PEIS files: {filename: R_ohm}
+
+    # Find available PEIS files
+    peis_files = []
+    for tech in ('PEIS', 'GEIS', 'EIS'):
+        if tech in files_by_technique:
+            peis_files.extend(files_by_technique[tech])
+
+    if peis_files and ec_data:
+        # Calculate R values (HF intercept) for all PEIS files
+        for _fname in peis_files:
+            if _fname in ec_data:
+                try:
+                    _df = load_df(ec_data[_fname]['df_path'])
+                    _r = find_hf_intercept(_df)
+                    if _r is not None:
+                        ir_r_values[_fname] = _r
+                except Exception:
+                    pass
+
+        # Build dropdown options: "filename (R = X.XX Ω)"
+        _peis_options = {"None": None}
+        for _fname, _r in ir_r_values.items():
+            _label = ec_data[_fname]['label'] if _fname in ec_data else _fname
+            _peis_options[f"{_label} (R = {_r:.3f} Ω)"] = _fname
+
+        ir_correction_controls = mo.ui.dictionary({
+            "peis_file": mo.ui.dropdown(
+                options=_peis_options,
+                value="None",
+                label="PEIS file for iR correction"
+            ),
+            "apply_correction": mo.ui.checkbox(
+                value=False,
+                label="Apply iR correction"
+            ),
+        })
+
+    return ir_correction_controls, ir_r_values
+
+
+@app.cell
 def _(detected_techniques, mo):
     # Technique tabs - one tab per detected technique
     technique_tabs = None
@@ -287,6 +334,8 @@ def _(
     ec_data,
     file_metadata,
     file_selector,
+    ir_correction_controls,
+    ir_r_values,
     load_df,
     mo,
 ):
@@ -300,7 +349,20 @@ def _(
     if ec_data and file_selector is not None and file_selector.value:
         _first_file = file_selector.value[0]
         if _first_file in ec_data:
-            _columns = ec_data[_first_file]['columns']
+            _columns = list(ec_data[_first_file]['columns'])
+
+            # Add potential_ir_corrected_V column option if iR correction is enabled
+            _ir_correction_available = False
+            if ir_correction_controls is not None:
+                _ir_values = ir_correction_controls.value
+                _ir_peis_file = _ir_values.get("peis_file")
+                _ir_apply = _ir_values.get("apply_correction", False)
+                if _ir_apply and _ir_peis_file in ir_r_values:
+                    # Check if files have required columns for correction
+                    if 'potential_V' in _columns and 'current_A' in _columns:
+                        _ir_correction_available = True
+                        if 'potential_ir_corrected_V' not in _columns:
+                            _columns.append('potential_ir_corrected_V')
 
             # Escape column names for display (< and > get interpreted as HTML)
             def _escape(s):
@@ -476,6 +538,7 @@ def _(
     chart_batch,
     cycle_selector,
     file_selector,
+    ir_correction_controls,
     mo,
     technique_controls,
 ):
@@ -492,6 +555,13 @@ def _(
                 chart_batch["x_col"], chart_batch["y_col"],
                 chart_batch["time_unit"],
             ])
+
+            # Add iR correction controls if available (CV, LSV, CA, CP techniques)
+            if ir_correction_controls is not None and active_technique in ('CV', 'LSV', 'CA', 'CP'):
+                _data_items.extend([
+                    ir_correction_controls["peis_file"],
+                    ir_correction_controls["apply_correction"],
+                ])
 
             # Add technique-specific controls based on active tab (CA/CP averaging)
             if technique_controls is not None:
@@ -673,6 +743,9 @@ def _(
     file_selector,
     find_hf_intercept,
     go,
+    ir_compensate,
+    ir_correction_controls,
+    ir_r_values,
     load_df,
     pl,
     px,
@@ -683,6 +756,22 @@ def _(
     chart_figure = None
     downsampled_files = []  # Track which files were downsampled
     analysis_results = {}  # Store analysis results (iR intercept, averages)
+
+    # Check if iR correction should be applied
+    _apply_ir_correction = False
+    _ir_resistance = None
+    _ir_peis_file = None
+    if ir_correction_controls is not None:
+        _ir_values = ir_correction_controls.value
+        _ir_peis_file = _ir_values.get("peis_file")
+        _apply_ir_correction = _ir_values.get("apply_correction", False) and _ir_peis_file is not None
+        if _apply_ir_correction and _ir_peis_file in ir_r_values:
+            _ir_resistance = ir_r_values[_ir_peis_file]
+            # Store iR correction info in analysis_results
+            analysis_results['ir_correction'] = {
+                'peis_file': _ir_peis_file,
+                'resistance_ohm': _ir_resistance,
+            }
 
     if chart_batch is not None and ec_data and file_selector is not None and file_selector.value:
         _v = chart_batch.value
@@ -849,6 +938,13 @@ def _(
             for _i, _fname in enumerate(_selected):
                 _data = ec_data[_fname]
                 _df = load_df(_data['df_path'])
+
+                # Apply iR correction if enabled (adds potential_ir_corrected_V column)
+                if _apply_ir_correction and _ir_resistance is not None:
+                    if 'potential_V' in _df.columns and 'current_A' in _df.columns:
+                        _df = _df.with_columns(
+                            (pl.col('potential_V') - pl.col('current_A') * _ir_resistance).alias('potential_ir_corrected_V')
+                        )
 
                 # Filter by selected cycles
                 if _selected_cycles is not None and 'cycle' in _df.columns:
@@ -1059,6 +1155,15 @@ def _(active_technique, analysis_results, ec_data, mo):
                 _file_label = ec_data[_fname]['label'] if _fname in ec_data else _fname
                 _lines.append(f"- {_file_label}: **{_ir:.3f} \u03a9**")
             _items.append(mo.md('\n'.join(_lines)))
+
+        # iR correction applied info
+        if 'ir_correction' in analysis_results:
+            _ir_info = analysis_results['ir_correction']
+            _peis_label = ec_data[_ir_info['peis_file']]['label'] if _ir_info['peis_file'] in ec_data else _ir_info['peis_file']
+            _items.append(mo.md(
+                f"**iR Correction Applied:** R = **{_ir_info['resistance_ohm']:.3f} \u03a9** "
+                f"(from {_peis_label})"
+            ))
 
         if _items:
             analysis_output = mo.vstack(_items, gap=1)

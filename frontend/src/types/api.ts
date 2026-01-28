@@ -11,6 +11,7 @@ export interface FileInfo {
   cycles: number[];
   columns: string[];
   custom: Record<string, unknown>;  // Custom column values for this file
+  analysis: Record<string, number>;  // Pre-computed analysis results (e.g., EIS intercepts)
 }
 
 export interface MetadataUpdate {
@@ -59,6 +60,7 @@ export interface ExportRequest {
 export interface UploadResponse {
   files: FileInfo[];
   plots: PlotConfigExport[] | null;  // Restored plots from session import
+  errors: string[];  // Files that failed to upload with error messages
 }
 
 export interface TechniquesResponse {
