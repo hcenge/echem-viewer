@@ -196,6 +196,39 @@ export function useApi() {
     return await response.json();
   }, []);
 
+  // Import correlations CSV
+  const importCorrelations = useCallback(async (file: File): Promise<{
+    applied: number;
+    skipped: number;
+    errors: string[];
+  }> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${API_BASE}/correlations/import`, {
+        ...fetchOptions,
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'Import failed');
+      }
+
+      return await response.json();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Import failed';
+      setError(message);
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   return {
     loading,
     error,
@@ -208,5 +241,6 @@ export function useApi() {
     getTechniques,
     exportSession,
     getStats,
+    importCorrelations,
   };
 }

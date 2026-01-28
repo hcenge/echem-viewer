@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Box, Button, IconButton, TextField, Tooltip } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AddIcon from '@mui/icons-material/Add';
@@ -6,6 +6,7 @@ import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
+import LinkIcon from '@mui/icons-material/Link';
 import { FileUpload } from '../FileUpload';
 
 interface FileTableToolbarProps {
@@ -15,6 +16,7 @@ interface FileTableToolbarProps {
   onDeleteSelected: () => void;
   onUpload?: (files: File[]) => Promise<void>;
   onAddColumn?: (name: string) => void;
+  onImportCorrelations?: (file: File) => Promise<void>;
 }
 
 export function FileTableToolbar({
@@ -24,9 +26,22 @@ export function FileTableToolbar({
   onDeleteSelected,
   onUpload,
   onAddColumn,
+  onImportCorrelations,
 }: FileTableToolbarProps) {
   const [addColumnOpen, setAddColumnOpen] = useState(false);
   const [newColumnName, setNewColumnName] = useState('');
+  const correlationsInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCorrelationsFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file && onImportCorrelations) {
+      await onImportCorrelations(file);
+    }
+    // Reset the input so the same file can be selected again
+    if (correlationsInputRef.current) {
+      correlationsInputRef.current.value = '';
+    }
+  };
 
   const handleAddColumn = () => {
     if (newColumnName.trim() && onAddColumn) {
@@ -84,6 +99,27 @@ export function FileTableToolbar({
             <CloseIcon fontSize="small" />
           </IconButton>
         </Box>
+      )}
+
+      {onImportCorrelations && (
+        <>
+          <input
+            type="file"
+            accept=".csv"
+            ref={correlationsInputRef}
+            onChange={handleCorrelationsFileChange}
+            style={{ display: 'none' }}
+          />
+          <Tooltip title="Import CSV mapping files to PEIS for iR correction">
+            <Button
+              size="small"
+              startIcon={<LinkIcon />}
+              onClick={() => correlationsInputRef.current?.click()}
+            >
+              Import Correlations
+            </Button>
+          </Tooltip>
+        </>
       )}
 
       {selectedCount > 0 && (

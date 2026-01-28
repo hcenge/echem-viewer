@@ -57,6 +57,7 @@ function App() {
     getTechniques,
     getStats,
     exportSession,
+    importCorrelations,
   } = useApi();
 
   const [files, setFiles] = useState<FileInfo[]>([]);
@@ -69,6 +70,9 @@ function App() {
   const [chartSettings, setChartSettings] = useState<ChartSettings>({ ...CHART_DEFAULTS });
   // Per-file cycle selection (filename -> selected cycles)
   const [selectedCycles, setSelectedCycles] = useState<Record<string, number[]>>({});
+
+  // iR correction state
+  const [irCorrectionEnabled, setIrCorrectionEnabled] = useState(false);
 
   // Multi-plot state
   const [plots, setPlots] = useState<PlotConfig[]>([]);
@@ -183,19 +187,32 @@ function App() {
   // Get available columns that exist in ALL selected files
   const availableColumns = useMemo(() => {
     const selectedFileInfos = filteredFiles.filter((f) => selectedFiles.includes(f.filename));
+    let columns: string[];
+
     if (selectedFileInfos.length === 0) {
       // If no files selected, show columns from all filtered files
       const columnSet = new Set<string>();
       filteredFiles.forEach((f) => f.columns.forEach((col) => columnSet.add(col)));
-      return Array.from(columnSet).sort();
+      columns = Array.from(columnSet).sort();
+    } else {
+      // Find intersection of columns across all selected files
+      const columnSets = selectedFileInfos.map((f) => new Set(f.columns));
+      const intersection = columnSets.reduce((acc, set) => {
+        return new Set([...acc].filter((col) => set.has(col)));
+      });
+      columns = Array.from(intersection).sort();
     }
-    // Find intersection of columns across all selected files
-    const columnSets = selectedFileInfos.map((f) => new Set(f.columns));
-    const intersection = columnSets.reduce((acc, set) => {
-      return new Set([...acc].filter((col) => set.has(col)));
-    });
-    return Array.from(intersection).sort();
-  }, [filteredFiles, selectedFiles]);
+
+    // Add potential_ir_corrected_V if iR correction is possible
+    // (files have potential_V and current_A, and any file has a linked PEIS)
+    const hasPotentialAndCurrent = columns.includes('potential_V') && columns.includes('current_A');
+    const hasLinkedPeis = selectedFileInfos.some((f) => customColumns[f.filename]?.linked_peis_file);
+    if (hasPotentialAndCurrent && hasLinkedPeis && irCorrectionEnabled) {
+      columns = ['potential_ir_corrected_V', ...columns];
+    }
+
+    return columns;
+  }, [filteredFiles, selectedFiles, customColumns, irCorrectionEnabled]);
 
   // Handle per-file cycle change
   const handleFileCyclesChange = (filename: string, cycles: number[]) => {
@@ -296,8 +313,8 @@ function App() {
 
   // Wrapper for getData that matches Chart component signature
   const handleGetData = useCallback(
-    async (filename: string, xCol: string, yCol: string, cycles?: number[]): Promise<DataResponse> => {
-      return getData(filename, { x_col: xCol, y_col: yCol, cycles });
+    async (filename: string, xCol: string, yCol: string, cycles?: number[], irResistance?: number): Promise<DataResponse> => {
+      return getData(filename, { x_col: xCol, y_col: yCol, cycles, ir_resistance: irResistance });
     },
     [getData]
   );
@@ -395,6 +412,82 @@ function App() {
       // Error handled by useApi, but we keep local state
     }
   };
+
+  // Handle importing correlations CSV
+  const handleImportCorrelations = async (file: File) => {
+    try {
+      const result = await importCorrelations(file);
+      // Refresh file list to get updated linked_peis_file metadata
+      await refreshFiles();
+      // Show success message
+      if (result.applied > 0) {
+        console.log(`Applied ${result.applied} correlations`);
+      }
+      if (result.errors.length > 0) {
+        setUploadErrors(result.errors);
+      }
+    } catch {
+      // Error handled by useApi
+    }
+  };
+
+  // Handle linked PEIS change for a file
+  const handleLinkedPeisChange = async (filename: string, peisFilename: string) => {
+    // Update local state immediately for responsiveness
+    setCustomColumns((prev) => ({
+      ...prev,
+      [filename]: {
+        ...prev[filename],
+        linked_peis_file: peisFilename || null,
+      },
+    }));
+    // Persist to backend
+    try {
+      await updateMetadata(filename, { custom: { linked_peis_file: peisFilename || null } });
+    } catch {
+      // Error handled by useApi
+    }
+  };
+
+  // Get linked resistance for a file (from linked PEIS file's analysis)
+  const getLinkedResistance = useCallback((filename: string): number | null => {
+    const linkedPeisFile = customColumns[filename]?.linked_peis_file as string;
+    if (!linkedPeisFile) return null;
+
+    // Find the PEIS file and get its hf_intercept (R_s)
+    const peisFile = files.find((f) => f.filename === linkedPeisFile);
+    if (!peisFile) return null;
+
+    const rs = peisFile.analysis?.hf_intercept_ohm;
+    // Only return if it's a positive number (analysis has been run)
+    return typeof rs === 'number' && rs > 0 ? rs : null;
+  }, [customColumns, files]);
+
+  // Get iR correction info for selected files (for sidebar display)
+  const irCorrectionInfo = useMemo(() => {
+    if (selectedFiles.length === 0) {
+      return { resistance: null, hasLink: false, needsAnalysis: false };
+    }
+
+    // Check all selected files for linked PEIS
+    for (const filename of selectedFiles) {
+      const linkedPeisFile = customColumns[filename]?.linked_peis_file as string;
+      if (linkedPeisFile) {
+        const peisFile = files.find((f) => f.filename === linkedPeisFile);
+        if (peisFile) {
+          const rs = peisFile.analysis?.hf_intercept_ohm;
+          // Only consider valid if it's a positive number
+          if (typeof rs === 'number' && rs > 0) {
+            return { resistance: rs, hasLink: true, needsAnalysis: false };
+          }
+          // Has link but no valid analysis
+          return { resistance: null, hasLink: true, needsAnalysis: true };
+        }
+      }
+    }
+
+    return { resistance: null, hasLink: false, needsAnalysis: false };
+  }, [selectedFiles, customColumns, files]);
 
   // Handle copying analysis results to custom columns
   const handleCopyAnalysisToTable = useCallback(
@@ -752,6 +845,9 @@ function App() {
                 customColumns={customColumns}
                 selectedCycles={selectedCycles}
                 onCyclesChange={handleFileCyclesChange}
+                onImportCorrelations={handleImportCorrelations}
+                onLinkedPeisChange={handleLinkedPeisChange}
+                allFiles={files}
               />
             </Box>
 
@@ -785,6 +881,12 @@ function App() {
                     onSettingsChange={handleSettingsChange}
                     availableColumns={availableColumns}
                     customColumns={customColumns}
+                    activeTechnique={activeTechnique === 'all' ? undefined : activeTechnique}
+                    irCorrectionEnabled={irCorrectionEnabled}
+                    onIrCorrectionChange={setIrCorrectionEnabled}
+                    linkedResistance={irCorrectionInfo.resistance}
+                    hasLinkedPeis={irCorrectionInfo.hasLink}
+                    needsEisAnalysis={irCorrectionInfo.needsAnalysis}
                   />
                   {activeTechnique !== 'all' && (
                     <AnalysisPanel
@@ -797,12 +899,14 @@ function App() {
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Chart
-                    files={filteredFiles}
+                    files={files}
                     selectedFiles={selectedFiles}
                     settings={chartSettings}
                     getData={handleGetData}
                     selectedCycles={selectedCycles}
                     customColumns={customColumns}
+                    irCorrectionEnabled={irCorrectionEnabled}
+                    getLinkedResistance={getLinkedResistance}
                   />
                 </Box>
               </Box>

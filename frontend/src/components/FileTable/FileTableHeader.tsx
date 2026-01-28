@@ -6,6 +6,7 @@ interface FileTableHeaderProps {
   someSelected: boolean;
   onSelectAll: (checked: boolean) => void;
   showCyclesColumn: boolean;
+  showLinkedPeisColumn: boolean;
   showExtendedColumns: boolean;
   analysisColumnNames: string[];
   customColumnNames: string[];
@@ -18,6 +19,7 @@ export function FileTableHeader({
   someSelected,
   onSelectAll,
   showCyclesColumn,
+  showLinkedPeisColumn,
   showExtendedColumns,
   analysisColumnNames,
   customColumnNames,
@@ -44,6 +46,7 @@ export function FileTableHeader({
           </TableCell>
         ))}
         {showCyclesColumn && <TableCell>Cycles</TableCell>}
+        {showLinkedPeisColumn && <TableCell>Linked PEIS</TableCell>}
         {showExtendedColumns && (
           <>
             <TableCell>Timestamp</TableCell>

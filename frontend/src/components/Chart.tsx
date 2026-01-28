@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Plot from 'react-plotly.js';
-import { Box, CircularProgress, Typography } from '@mui/material';
+import { Box, CircularProgress, Typography, IconButton, Tooltip } from '@mui/material';
+import DownloadIcon from '@mui/icons-material/Download';
 import type { Data, Layout } from 'plotly.js';
 import type { FileInfo, DataResponse } from '../types/api';
 
@@ -41,9 +42,11 @@ interface ChartProps {
   files: FileInfo[];
   selectedFiles: string[];
   settings: ChartSettings;
-  getData: (filename: string, xCol: string, yCol: string, cycles?: number[]) => Promise<DataResponse>;
+  getData: (filename: string, xCol: string, yCol: string, cycles?: number[], irResistance?: number) => Promise<DataResponse>;
   selectedCycles?: Record<string, number[]>;
   customColumns?: Record<string, Record<string, unknown>>;
+  irCorrectionEnabled?: boolean;
+  getLinkedResistance?: (filename: string) => number | null;
 }
 
 interface TraceData {
@@ -62,6 +65,8 @@ export function Chart({
   getData,
   selectedCycles,
   customColumns = {},
+  irCorrectionEnabled = false,
+  getLinkedResistance,
 }: ChartProps) {
   const [traceData, setTraceData] = useState<TraceData[]>([]);
   const [loading, setLoading] = useState(false);
@@ -95,7 +100,17 @@ export function Chart({
           if (!fileInfo) continue;
 
           const cycles = selectedCycles?.[filename];
-          const data = await getData(filename, settings.xCol, settings.yCol, cycles);
+
+          // Get iR resistance if correction is enabled and file has linked PEIS
+          let irResistance: number | undefined;
+          if (irCorrectionEnabled && getLinkedResistance) {
+            const resistance = getLinkedResistance(filename);
+            if (resistance !== null) {
+              irResistance = resistance;
+            }
+          }
+
+          const data = await getData(filename, settings.xCol, settings.yCol, cycles, irResistance);
 
           if (cancelled) return;
 
@@ -128,7 +143,7 @@ export function Chart({
     return () => {
       cancelled = true;
     };
-  }, [selectedFiles, settings.xCol, settings.yCol, selectedCycles, fileInfoMap, getData]);
+  }, [selectedFiles, settings.xCol, settings.yCol, selectedCycles, fileInfoMap, getData, irCorrectionEnabled, getLinkedResistance]);
 
   // Helper to get trace name
   const getTraceName = (trace: TraceData) => {
@@ -530,6 +545,63 @@ export function Chart({
     return { plotData: traces, layout: layoutConfig };
   }, [traceData, settings, getTraceName]);
 
+  // Export CSV handler
+  const handleExportCSV = useCallback(() => {
+    if (traceData.length === 0) return;
+
+    // Helper to escape CSV values
+    const escapeCSV = (value: string | number | null | undefined): string => {
+      if (value === null || value === undefined) return '';
+      const str = String(value);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    // Build metadata section
+    const metadataHeaders = ['filename', 'label', 'linked_peis', 'hf_intercept_ohm'];
+    const metadataRows = traceData.map(trace => {
+      const linkedPeis = (customColumns[trace.filename]?.linked_peis_file as string) || '';
+      const linkedFile = linkedPeis ? files.find(f => f.filename === linkedPeis) : null;
+      const hfIntercept = linkedFile?.analysis?.hf_intercept_ohm ?? '';
+      return [trace.filename, trace.label, linkedPeis, hfIntercept].map(escapeCSV);
+    });
+
+    // Build data section (columns side by side)
+    const maxLen = Math.max(...traceData.map(t => t.x.length));
+    const dataHeaders = traceData.flatMap(t => [`${t.filename}_x`, `${t.filename}_y`]);
+    const dataRows = Array.from({ length: maxLen }, (_, i) =>
+      traceData.flatMap(t => [
+        escapeCSV(t.x[i] ?? ''),
+        escapeCSV(t.y[i] ?? '')
+      ])
+    );
+
+    // Combine into CSV
+    const csvLines = [
+      '# Metadata',
+      metadataHeaders.join(','),
+      ...metadataRows.map(r => r.join(',')),
+      '',
+      '# Data',
+      dataHeaders.join(','),
+      ...dataRows.map(r => r.join(','))
+    ];
+    const csv = csvLines.join('\n');
+
+    // Download
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'plot_data.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [traceData, customColumns, files]);
+
   // Show empty state if no files selected
   if (selectedFiles.length === 0) {
     return (
@@ -585,17 +657,33 @@ export function Chart({
 
   return (
     <Box sx={{ position: 'relative' }}>
-      {loading && (
-        <CircularProgress
-          size={24}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            zIndex: 1,
-          }}
-        />
-      )}
+      <Box
+        sx={{
+          position: 'absolute',
+          top: 8,
+          right: 8,
+          zIndex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+        }}
+      >
+        {loading && <CircularProgress size={24} />}
+        {traceData.length > 0 && (
+          <Tooltip title="Export CSV">
+            <IconButton
+              size="small"
+              onClick={handleExportCSV}
+              sx={{
+                bgcolor: 'background.paper',
+                '&:hover': { bgcolor: 'action.hover' },
+              }}
+            >
+              <DownloadIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+      </Box>
       <Plot
         data={plotData}
         layout={layout}

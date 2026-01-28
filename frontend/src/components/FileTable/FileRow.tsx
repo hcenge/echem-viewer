@@ -2,6 +2,10 @@ import { Checkbox, Chip, TableCell, TableRow } from '@mui/material';
 import type { FileInfo } from '../../types/api';
 import { EditableCell } from './EditableCell';
 import { CycleSelector } from './CycleSelector';
+import { LinkedPEISSelector } from './LinkedPEISSelector';
+
+// Techniques that can be iR corrected (have potential and current)
+const IR_CORRECTABLE_TECHNIQUES = ['CA', 'CV', 'LSV', 'CP', 'OCV'];
 
 interface FileRowProps {
   file: FileInfo;
@@ -16,6 +20,10 @@ interface FileRowProps {
   customColumnNames: string[];
   customColumnValues: Record<string, unknown>;
   onCustomCellChange: (columnName: string, value: string) => void;
+  showLinkedPeisColumn: boolean;
+  peisFiles: FileInfo[];
+  linkedPeisFile: string;
+  onLinkedPeisChange: (filename: string) => void;
 }
 
 export function FileRow({
@@ -31,8 +39,13 @@ export function FileRow({
   customColumnNames,
   customColumnValues,
   onCustomCellChange,
+  showLinkedPeisColumn,
+  peisFiles,
+  linkedPeisFile,
+  onLinkedPeisChange,
 }: FileRowProps) {
   const hasCycles = file.cycles && file.cycles.length > 0;
+  const canLinkPeis = file.technique && IR_CORRECTABLE_TECHNIQUES.includes(file.technique);
 
   return (
     <TableRow selected={isSelected} hover>
@@ -74,6 +87,20 @@ export function FileRow({
               availableCycles={file.cycles!}
               selectedCycles={selectedCycles}
               onChange={onCyclesChange}
+            />
+          ) : (
+            <span style={{ opacity: 0.4 }}>-</span>
+          )}
+        </TableCell>
+      )}
+
+      {showLinkedPeisColumn && (
+        <TableCell>
+          {canLinkPeis ? (
+            <LinkedPEISSelector
+              value={linkedPeisFile}
+              peisFiles={peisFiles}
+              onChange={onLinkedPeisChange}
             />
           ) : (
             <span style={{ opacity: 0.4 }}>-</span>

@@ -19,6 +19,9 @@ interface FileTableProps {
   customColumns?: Record<string, Record<string, unknown>>;
   selectedCycles?: Record<string, number[]>;
   onCyclesChange?: (filename: string, cycles: number[]) => void;
+  onImportCorrelations?: (file: File) => Promise<void>;
+  onLinkedPeisChange?: (filename: string, peisFilename: string) => void;
+  allFiles?: FileInfo[];  // All files (not filtered) for PEIS lookup
 }
 
 export function FileTable({
@@ -35,18 +38,21 @@ export function FileTable({
   customColumns = {},
   selectedCycles = {},
   onCyclesChange,
+  onImportCorrelations,
+  onLinkedPeisChange,
+  allFiles,
 }: FileTableProps) {
   const [showExtendedColumns, setShowExtendedColumns] = useState(false);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
 
-  // Get all custom column names
+  // Get all custom column names (excluding linked_peis_file which has its own column)
   const customColumnNames = Object.keys(
     Object.values(customColumns).reduce<Record<string, unknown>>(
       (acc, cols) => ({ ...acc, ...cols }),
       {}
     )
-  );
+  ).filter((name) => name !== 'linked_peis_file');
 
   // Get all analysis column names from all files
   const analysisColumnNames = useMemo(() => {
@@ -61,6 +67,17 @@ export function FileTable({
 
   // Check if any file has cycles (to show the column)
   const hasCycleFiles = files.some((f) => f.cycles && f.cycles.length > 0);
+
+  // Get available PEIS files (from all files, not just filtered)
+  const peisFiles = useMemo(() => {
+    const source = allFiles || files;
+    return source.filter((f) =>
+      f.technique && ['PEIS', 'GEIS', 'EIS'].includes(f.technique)
+    );
+  }, [allFiles, files]);
+
+  // Show linked PEIS column if there are PEIS files available
+  const showLinkedPeisColumn = peisFiles.length > 0;
 
   // Paginated files
   const paginatedFiles = useMemo(() => {
@@ -113,6 +130,7 @@ export function FileTable({
         onDeleteSelected={() => onDeleteSelected(selectedFiles)}
         onUpload={onUpload}
         onAddColumn={onCustomColumnAdd}
+        onImportCorrelations={onImportCorrelations}
       />
 
       <TableContainer component={Paper} variant="outlined">
@@ -122,6 +140,7 @@ export function FileTable({
             someSelected={someSelected}
             onSelectAll={handleSelectAll}
             showCyclesColumn={hasCycleFiles}
+            showLinkedPeisColumn={showLinkedPeisColumn}
             showExtendedColumns={showExtendedColumns}
             analysisColumnNames={analysisColumnNames}
             customColumnNames={customColumnNames}
@@ -144,6 +163,10 @@ export function FileTable({
                 customColumnNames={customColumnNames}
                 customColumnValues={customColumns[file.filename] || {}}
                 onCustomCellChange={(col, value) => onCustomCellChange?.(file.filename, col, value)}
+                showLinkedPeisColumn={showLinkedPeisColumn}
+                peisFiles={peisFiles}
+                linkedPeisFile={(customColumns[file.filename]?.linked_peis_file as string) || ''}
+                onLinkedPeisChange={(peisFilename) => onLinkedPeisChange?.(file.filename, peisFilename)}
               />
             ))}
           </TableBody>

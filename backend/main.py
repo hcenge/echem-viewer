@@ -26,7 +26,6 @@ from echem_core import (
     TECHNIQUE_DEFAULTS,
     # Analysis functions
     find_hf_intercept,
-    find_lf_intercept,
     calculate_time_average,
     calculate_charge,
     overpotential_at_current,
@@ -131,6 +130,7 @@ class DataRequest(BaseModel):
     y_col: str
     cycles: list[int] | None = None
     max_points: int | None = 5000  # Downsample if more points than this
+    ir_resistance: float | None = None  # For iR correction: V_corrected = V - I * R
 
 
 class DataResponse(BaseModel):
@@ -174,6 +174,13 @@ class AnalysisRequest(BaseModel):
     target_current: float | None = None  # For CP overpotential
     target_potential: float | None = None  # For LSV current_at_potential
     threshold_current: float | None = None  # For LSV onset potential
+
+
+class CorrelationsImportResponse(BaseModel):
+    """Response from correlations import."""
+    applied: int
+    skipped: int
+    errors: list[str]
 
 
 # ============== Endpoints ==============
@@ -340,6 +347,8 @@ def get_file_data(
     session: SessionState = Depends(get_session),
 ) -> DataResponse:
     """Get display-ready x/y data for a file."""
+    import polars as pl
+
     if filename not in session.datasets:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
@@ -348,10 +357,18 @@ def get_file_data(
 
     # Filter by cycles if specified
     if request.cycles and "cycle" in df.columns:
-        import polars as pl
         df = df.filter(pl.col("cycle").is_in(request.cycles))
 
-    # Validate columns exist
+    # Apply iR correction if requested
+    # Creates potential_ir_corrected_V = potential_V - current_A * ir_resistance
+    if request.ir_resistance is not None:
+        if "potential_V" in df.columns and "current_A" in df.columns:
+            df = df.with_columns(
+                (pl.col("potential_V") - pl.col("current_A") * request.ir_resistance)
+                .alias("potential_ir_corrected_V")
+            )
+
+    # Validate columns exist (after potential iR correction column creation)
     if request.x_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column not found: {request.x_col}")
     if request.y_col not in df.columns:
@@ -386,6 +403,73 @@ def get_techniques(session: SessionState = Depends(get_session)) -> dict:
     }
 
 
+@app.post("/correlations/import")
+async def import_correlations(
+    file: UploadFile,
+    session: SessionState = Depends(get_session),
+) -> CorrelationsImportResponse:
+    """Import a CSV lookup table mapping echem files to PEIS files for iR correction.
+
+    CSV format (minimum required columns):
+    echem_ca_file,echem_peis_file
+    0pt5V_02_CA_C01.mpr,0pt5V_01_PEIS_C01.mpr
+    """
+    import csv
+
+    content = await file.read()
+
+    try:
+        # Decode and parse CSV
+        text = content.decode('utf-8')
+        reader = csv.DictReader(text.strip().splitlines())
+
+        # Validate required columns
+        fieldnames = reader.fieldnames or []
+        if 'echem_ca_file' not in fieldnames or 'echem_peis_file' not in fieldnames:
+            raise HTTPException(
+                status_code=400,
+                detail="CSV must have 'echem_ca_file' and 'echem_peis_file' columns"
+            )
+
+        applied = 0
+        skipped = 0
+        errors = []
+
+        for row in reader:
+            ca_file = row.get('echem_ca_file', '').strip()
+            peis_file = row.get('echem_peis_file', '').strip()
+
+            if not ca_file or not peis_file:
+                skipped += 1
+                continue
+
+            # Check if both files exist in session
+            if ca_file not in session.datasets:
+                errors.append(f"{ca_file}: File not found in session")
+                skipped += 1
+                continue
+
+            if peis_file not in session.datasets:
+                errors.append(f"{peis_file}: PEIS file not found in session")
+                skipped += 1
+                continue
+
+            # Update the CA file's metadata with linked PEIS file
+            session.update_metadata(ca_file, {'linked_peis_file': peis_file})
+            applied += 1
+
+        return CorrelationsImportResponse(
+            applied=applied,
+            skipped=skipped,
+            errors=errors
+        )
+
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid file encoding. Please use UTF-8.")
+    except csv.Error as e:
+        raise HTTPException(status_code=400, detail=f"CSV parsing error: {str(e)}")
+
+
 @app.post("/analysis/{technique}")
 def run_analysis(
     technique: str,
@@ -407,16 +491,10 @@ def run_analysis(
         file_results = {}
 
         if technique in ("PEIS", "GEIS", "EIS"):
-            # EIS analysis: HF and LF intercepts
+            # EIS analysis: HF intercept (R_s) for iR correction
             hf = find_hf_intercept(df)
-            lf = find_lf_intercept(df)
             if hf is not None:
                 file_results["hf_intercept_ohm"] = round(hf, 4)
-            if lf is not None:
-                file_results["lf_intercept_ohm"] = round(lf, 4)
-            # Calculate charge transfer resistance (R_ct = R_total - R_solution)
-            if hf is not None and lf is not None:
-                file_results["r_ct_ohm"] = round(lf - hf, 4)
 
         elif technique == "CA":
             # Chronoamperometry: time average and charge

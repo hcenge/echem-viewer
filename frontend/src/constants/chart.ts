@@ -234,6 +234,7 @@ export const COLUMN_UNIT_MAP: Record<string, typeof TIME_UNITS | typeof CURRENT_
   time_s: TIME_UNITS,
   current_A: CURRENT_UNITS,
   potential_V: POTENTIAL_UNITS,
+  potential_ir_corrected_V: POTENTIAL_UNITS,
   z_real_Ohm: IMPEDANCE_UNITS,
   z_imag_Ohm: IMPEDANCE_UNITS,
   z_mag_Ohm: IMPEDANCE_UNITS,

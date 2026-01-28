@@ -24,6 +24,7 @@ export interface DataRequest {
   y_col: string;
   cycles?: number[];
   max_points?: number;  // Downsample if more points than this
+  ir_resistance?: number;  // For iR correction: V_corrected = V - I * R
 }
 
 export interface SessionStats {

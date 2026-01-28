@@ -25,13 +25,29 @@ interface SidebarProps {
   onSettingsChange: (settings: ChartSettings) => void;
   availableColumns: string[];
   customColumns: Record<string, Record<string, unknown>>;
+  // iR correction props
+  activeTechnique?: string;
+  irCorrectionEnabled?: boolean;
+  onIrCorrectionChange?: (enabled: boolean) => void;
+  linkedResistance?: number | null;  // R_s from linked PEIS file
+  hasLinkedPeis?: boolean;  // Whether any selected file has a linked PEIS
+  needsEisAnalysis?: boolean;  // Whether linked PEIS needs analysis run
 }
+
+// Techniques that can be iR corrected (have potential and current)
+const IR_CORRECTABLE_TECHNIQUES = ['CA', 'CV', 'LSV', 'CP', 'OCV'];
 
 export function Sidebar({
   settings,
   onSettingsChange,
   availableColumns,
   customColumns,
+  activeTechnique,
+  irCorrectionEnabled = false,
+  onIrCorrectionChange,
+  linkedResistance,
+  hasLinkedPeis = false,
+  needsEisAnalysis = false,
 }: SidebarProps) {
   const updateSetting = <K extends keyof ChartSettings>(
     key: K,
@@ -49,6 +65,9 @@ export function Sidebar({
   const showMarkerControls = settings.lineMode === 'markers' || settings.lineMode === 'lines+markers';
   const showLineControls = settings.lineMode === 'lines' || settings.lineMode === 'lines+markers';
   const showStackedControls = settings.plotType === 'y_stacked';
+
+  // Show iR correction controls only for correctable techniques
+  const showIrCorrectionControls = activeTechnique && IR_CORRECTABLE_TECHNIQUES.includes(activeTechnique);
 
   // Font formats with defaults
   const titleFormat = settings.titleFormat || CHART_DEFAULTS.titleFormat!;
@@ -81,6 +100,33 @@ export function Sidebar({
 
   return (
     <Box>
+      {/* Data Section - iR Correction */}
+      {showIrCorrectionControls && (
+        <SettingSection title="Data">
+          <SettingToggle
+            label="Apply iR correction"
+            checked={irCorrectionEnabled}
+            onChange={(v) => onIrCorrectionChange?.(v)}
+            disabled={linkedResistance === null || linkedResistance === undefined}
+          />
+          {irCorrectionEnabled && linkedResistance !== null && linkedResistance !== undefined && (
+            <Box sx={{ fontSize: '0.75rem', color: 'text.secondary', mt: 0.5, ml: 0.5 }}>
+              R = {linkedResistance.toFixed(2)} Ω
+            </Box>
+          )}
+          {!hasLinkedPeis && (
+            <Box sx={{ fontSize: '0.75rem', color: 'text.secondary', mt: 0.5, ml: 0.5 }}>
+              Link a PEIS file in the table to enable
+            </Box>
+          )}
+          {hasLinkedPeis && needsEisAnalysis && (
+            <Box sx={{ fontSize: '0.75rem', color: 'warning.main', mt: 0.5, ml: 0.5 }}>
+              Run EIS analysis to get R_s value
+            </Box>
+          )}
+        </SettingSection>
+      )}
+
       {/* Axes Section */}
       <SettingSection title="Axes">
         <SettingSelect
