@@ -22,6 +22,16 @@ from echem_core import (
     generate_matplotlib_code,
     EchemDataset,
     TECHNIQUE_DEFAULTS,
+    # Analysis functions
+    find_hf_intercept,
+    find_lf_intercept,
+    calculate_time_average,
+    calculate_charge,
+    overpotential_at_current,
+    onset_potential,
+    limiting_current,
+    current_at_potential,
+    steady_state_potential,
 )
 from state import state, MAX_FILES, MAX_FILE_SIZE_MB
 
@@ -100,6 +110,17 @@ class ExportRequest(BaseModel):
     plot_settings: dict | None = None  # Legacy single plot settings
     plots: list[PlotConfigExport] | None = None  # Multi-plot configs
     file_metadata: dict | None = None  # Custom columns from file table
+
+
+class AnalysisRequest(BaseModel):
+    """Analysis request for a specific technique."""
+    files: list[str]  # Files to analyze
+    # Optional parameters for different analysis types
+    t_start: float | None = None  # For CA/CP time average
+    t_end: float | None = None
+    target_current: float | None = None  # For CP overpotential
+    target_potential: float | None = None  # For LSV current_at_potential
+    threshold_current: float | None = None  # For LSV onset potential
 
 
 # ============== Endpoints ==============
@@ -279,6 +300,105 @@ def get_techniques() -> dict:
     }
 
 
+@app.post("/analysis/{technique}")
+def run_analysis(technique: str, request: AnalysisRequest) -> dict:
+    """Run technique-specific analysis on selected files.
+
+    Returns a dict mapping filename -> analysis results.
+    """
+    results = {}
+
+    for filename in request.files:
+        if filename not in state.datasets:
+            continue
+
+        ds = state.datasets[filename]
+        df = ds.df
+        file_results = {}
+
+        if technique in ("PEIS", "GEIS", "EIS"):
+            # EIS analysis: HF and LF intercepts
+            hf = find_hf_intercept(df)
+            lf = find_lf_intercept(df)
+            if hf is not None:
+                file_results["hf_intercept_ohm"] = round(hf, 4)
+            if lf is not None:
+                file_results["lf_intercept_ohm"] = round(lf, 4)
+            # Calculate charge transfer resistance (R_ct = R_total - R_solution)
+            if hf is not None and lf is not None:
+                file_results["r_ct_ohm"] = round(lf - hf, 4)
+
+        elif technique == "CA":
+            # Chronoamperometry: time average and charge
+            if request.t_start is not None and request.t_end is not None:
+                avg_current = calculate_time_average(
+                    df, "current_A", request.t_start, request.t_end
+                )
+                if avg_current is not None:
+                    file_results["avg_current_A"] = avg_current
+                    # Also provide in mA for convenience
+                    file_results["avg_current_mA"] = avg_current * 1000
+
+            charge = calculate_charge(df)
+            if charge is not None:
+                file_results["charge_C"] = charge
+                file_results["charge_mC"] = charge * 1000
+
+        elif technique == "CP":
+            # Chronopotentiometry: time average of potential
+            if request.t_start is not None and request.t_end is not None:
+                avg_potential = calculate_time_average(
+                    df, "potential_V", request.t_start, request.t_end
+                )
+                if avg_potential is not None:
+                    file_results["avg_potential_V"] = avg_potential
+
+            # Overpotential at target current
+            if request.target_current is not None:
+                overpot = overpotential_at_current(df, request.target_current)
+                if overpot is not None:
+                    file_results["overpotential_V"] = overpot
+
+        elif technique == "LSV":
+            # Linear sweep voltammetry
+            # Onset potential
+            if request.threshold_current is not None:
+                onset = onset_potential(df, request.threshold_current)
+                if onset is not None:
+                    file_results["onset_potential_V"] = onset
+
+            # Limiting current
+            lim_current = limiting_current(df)
+            if lim_current is not None:
+                file_results["limiting_current_A"] = lim_current
+                file_results["limiting_current_mA"] = lim_current * 1000
+
+            # Current at specific potential
+            if request.target_potential is not None:
+                current = current_at_potential(df, request.target_potential)
+                if current is not None:
+                    file_results["current_at_potential_A"] = current
+                    file_results["current_at_potential_mA"] = current * 1000
+
+        elif technique == "OCV":
+            # Open circuit voltage: steady state
+            ss_potential = steady_state_potential(df)
+            if ss_potential is not None:
+                file_results["steady_state_V"] = ss_potential
+
+        elif technique == "CV":
+            # Cyclic voltammetry: charge per cycle
+            charge = calculate_charge(df)
+            if charge is not None:
+                file_results["charge_C"] = charge
+                file_results["charge_mC"] = charge * 1000
+
+        if file_results:
+            results[filename] = file_results
+
+    return {"technique": technique, "results": results}
+
+
 @app.post("/export")
 def export_session(request: ExportRequest):
     """Export selected files as zip."""
@@ -409,5 +529,7 @@ if FRONTEND_DIR.exists():
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="127.0.0.1", port=port)

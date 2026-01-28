@@ -1,6 +1,6 @@
 # React + FastAPI Frontend Implementation Plan
 
-> **Status:** Phases 1-4, 6 complete. **Phase 5 (Analysis Tools) not started.** Phase 7 partial.
+> **Status:** Phases 1-6 complete. Phase 7 partial (error handling and loading states done, responsive layout and testing remaining).
 
 ## Overview
 
@@ -481,11 +481,11 @@ def export_session(
 15. ✅ Add cycle selector for CV/LSV
 16. ✅ Complete FileTable (custom columns, delete)
 
-### Phase 5: Analysis ❌ NOT STARTED
-17. ❌ Implement `/analysis/{technique}` endpoint
-18. ❌ Build TechniqueTools component
-19. ❌ Build AnalysisResults component
-20. ❌ Implement "Copy to Table" functionality
+### Phase 5: Analysis ✅ COMPLETE
+17. ✅ Implement `/analysis/{technique}` endpoint
+18. ✅ Build TechniqueTools component (as technique-specific: EISAnalysis, CAAnalysis, etc.)
+19. ✅ Build AnalysisResults component
+20. ✅ Implement "Copy to Table" functionality
 
 ### Phase 6: Export ✅ COMPLETE
 21. ✅ Implement `/export` endpoint

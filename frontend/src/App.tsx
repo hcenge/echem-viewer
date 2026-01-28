@@ -26,6 +26,7 @@ import { TechniqueTabs } from './components/TechniqueTabs';
 import { Sidebar } from './components/Sidebar/index';
 import { PlotsList } from './components/PlotsList';
 import { ExportPanel } from './components/ExportPanel';
+import { AnalysisPanel } from './components/analysis';
 import type { ChartSettings } from './components/Chart';
 import { CHART_DEFAULTS } from './constants/chart';
 import type { FileInfo, DataResponse, PlotConfig, SessionStats, PlotConfigExport } from './types/api';
@@ -382,6 +383,34 @@ function App() {
     }
   };
 
+  // Handle copying analysis results to custom columns
+  const handleCopyAnalysisToTable = useCallback(
+    async (columnName: string, values: Record<string, string>) => {
+      // First, ensure the column exists for all files
+      setCustomColumns((prev) => {
+        const updated = { ...prev };
+        // Add column to all files, with values where available
+        files.forEach((file) => {
+          if (!updated[file.filename]) {
+            updated[file.filename] = {};
+          }
+          updated[file.filename][columnName] = values[file.filename] || '';
+        });
+        return updated;
+      });
+
+      // Persist to backend for files with values
+      try {
+        for (const [filename, value] of Object.entries(values)) {
+          await updateMetadata(filename, { custom: { [columnName]: value } });
+        }
+      } catch {
+        // Error handled by useApi
+      }
+    },
+    [files, updateMetadata]
+  );
+
   // ============== Plot Management ==============
 
   // Check if current state has unsaved changes
@@ -723,6 +752,13 @@ function App() {
                     availableColumns={availableColumns}
                     customColumns={customColumns}
                   />
+                  {activeTechnique !== 'all' && (
+                    <AnalysisPanel
+                      technique={activeTechnique}
+                      selectedFiles={selectedFiles}
+                      onCopyToTable={handleCopyAnalysisToTable}
+                    />
+                  )}
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Chart
