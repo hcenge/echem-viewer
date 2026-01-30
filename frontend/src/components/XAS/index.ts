@@ -8,3 +8,4 @@ export { XASSidebar } from './XASSidebar';
 export { NormalizationControls } from './NormalizationControls';
 export { XASChart } from './XASChart';
 export type { ChartMode } from './XASChart';
+export { ChannelSelector } from './ChannelSelector';

@@ -1,10 +1,14 @@
 /**
  * XAS Chart component using Plotly for visualization.
+ *
+ * Supports two modes:
+ * - Direct View Mode: Shows raw H5 data from selected channels
+ * - ROI Mode: Shows normalized data from selected ROI configuration
  */
 
 import { useMemo } from 'react';
 import Plot from 'react-plotly.js';
-import { Box, Paper, Typography, ToggleButtonGroup, ToggleButton } from '@mui/material';
+import { Box, Paper, Typography, ToggleButtonGroup, ToggleButton, Chip } from '@mui/material';
 import { useXAS } from '../../contexts/XASContext';
 
 export type ChartMode = 'normalized' | 'raw' | 'preedge_fit';
@@ -18,14 +22,32 @@ export function XASChart({ mode = 'normalized', onModeChange }: XASChartProps) {
   const {
     currentScanData,
     selectedScan,
+    selectedROI,
     normParams,
     isProjectOpen,
+    isDirectViewMode,
+    directViewData,
+    directViewLoading,
   } = useXAS();
 
   const plotData = useMemo(() => {
-    if (!currentScanData) return [];
-
     const traces: Plotly.Data[] = [];
+
+    // Direct view mode: show raw channel data
+    if (isDirectViewMode && directViewData) {
+      traces.push({
+        x: directViewData.x,
+        y: directViewData.y,
+        type: 'scatter',
+        mode: 'lines',
+        name: directViewData.y_label,
+        line: { color: '#1976d2', width: 1.5 },
+      });
+      return traces;
+    }
+
+    // ROI mode: show normalized data
+    if (!currentScanData) return [];
 
     if (mode === 'raw') {
       // Show raw mu
@@ -139,15 +161,24 @@ export function XASChart({ mode = 'normalized', onModeChange }: XASChartProps) {
     }
 
     return traces;
-  }, [currentScanData, mode, normParams]);
+  }, [currentScanData, mode, normParams, isDirectViewMode, directViewData]);
 
   const layout = useMemo((): Partial<Plotly.Layout> => {
-    const yTitle = mode === 'normalized' ? 'Normalized Absorption' : 'Absorption (arb.)';
+    // Use appropriate axis titles based on mode
+    let xTitle = 'Energy (eV)';
+    let yTitle = mode === 'normalized' ? 'Normalized Absorption' : 'Absorption (arb.)';
+
+    // In direct view mode, use the actual channel labels
+    if (isDirectViewMode && directViewData) {
+      xTitle = directViewData.x_label;
+      yTitle = directViewData.y_label;
+    }
+
     return {
       autosize: true,
       margin: { l: 60, r: 30, t: 30, b: 50 },
       xaxis: {
-        title: { text: 'Energy (eV)' },
+        title: { text: xTitle },
         showgrid: true,
         gridcolor: '#e0e0e0',
         zeroline: false,
@@ -167,7 +198,7 @@ export function XASChart({ mode = 'normalized', onModeChange }: XASChartProps) {
       },
       hovermode: 'x unified',
     };
-  }, [mode]);
+  }, [mode, isDirectViewMode, directViewData]);
 
   if (!isProjectOpen) {
     return (
@@ -179,21 +210,41 @@ export function XASChart({ mode = 'normalized', onModeChange }: XASChartProps) {
     );
   }
 
-  if (!currentScanData) {
+  // Check for data based on mode
+  const hasData = isDirectViewMode ? directViewData : currentScanData;
+  const isLoading = isDirectViewMode ? directViewLoading : !currentScanData && selectedScan;
+
+  if (!hasData) {
+    let message = 'Select a scan to view';
+    if (isLoading) {
+      message = 'Loading scan data...';
+    } else if (selectedScan && isDirectViewMode) {
+      message = 'Select channels to view data';
+    }
     return (
       <Paper sx={{ p: 4, textAlign: 'center' }}>
         <Typography variant="body1" color="text.secondary">
-          {selectedScan ? 'Loading scan data...' : 'Select a scan to view'}
+          {message}
         </Typography>
       </Paper>
     );
   }
 
   return (
-    <Paper sx={{ p: 1 }}>
-      {/* Mode toggle */}
-      {onModeChange && (
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+    <Paper sx={{ p: 1, position: 'relative' }}>
+      {/* Mode indicator */}
+      <Box sx={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}>
+        <Chip
+          label={isDirectViewMode ? 'Direct View' : `ROI: ${selectedROI}`}
+          size="small"
+          color={isDirectViewMode ? 'default' : 'primary'}
+          variant="outlined"
+        />
+      </Box>
+
+      {/* Mode toggle - only show in ROI mode */}
+      {onModeChange && !isDirectViewMode && (
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1, mr: 12 }}>
           <ToggleButtonGroup
             value={mode}
             exclusive

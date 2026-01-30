@@ -24,6 +24,9 @@ import type {
   CodeExportPreview,
   ReviewProgress,
   BulkApplyParamsRequest,
+  H5ChannelInfo,
+  DirectViewRequest,
+  DirectViewResponse,
 } from '../types/xas';
 
 const API_BASE = '/api/xas';
@@ -126,6 +129,25 @@ export function useXASApi() {
   const deleteROIConfig = useCallback(async (name: string): Promise<{ status: string }> => {
     return apiFetch<{ status: string }>(`/roi-configs/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+    });
+  }, [apiFetch]);
+
+  // H5 Channel Discovery & Direct View
+  const getH5Channels = useCallback(async (
+    sample: string,
+    dataset: string
+  ): Promise<H5ChannelInfo> => {
+    return apiFetch<H5ChannelInfo>(
+      `/h5-channels/${encodeURIComponent(sample)}/${encodeURIComponent(dataset)}`
+    );
+  }, [apiFetch]);
+
+  const getDirectViewData = useCallback(async (
+    request: DirectViewRequest
+  ): Promise<DirectViewResponse> => {
+    return apiFetch<DirectViewResponse>('/direct-view', {
+      method: 'POST',
+      body: JSON.stringify(request),
     });
   }, [apiFetch]);
 
@@ -318,6 +340,10 @@ export function useXASApi() {
     getValidROIsForDataset,
     saveROIConfig,
     deleteROIConfig,
+
+    // H5 Channels & Direct View
+    getH5Channels,
+    getDirectViewData,
 
     // Normalization
     normalize,

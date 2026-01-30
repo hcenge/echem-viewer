@@ -33,6 +33,7 @@ from echem_core.xas import (
     find_valid_scans,
     BEAMLINE_CONFIGS,
 )
+from echem_core.xas.h5_reader import get_h5_channels, read_direct_channels, evaluate_expression
 from echem_core.xas.codegen import generate_xas_code
 
 router = APIRouter()
@@ -102,12 +103,24 @@ class ProjectOpenRequest(BaseModel):
 
 class ROIConfig(BaseModel):
     name: str
-    display_name: str
-    element: str
+    display_name: Optional[str] = None
+    element: Optional[str] = None  # e.g., "Ir", "Pt", "Co"
+    parent_path: str = "instrument"
     numerator: str
     denominator: Optional[str] = None
+    invert_y: bool = False
     energy_min: Optional[float] = None  # keV
     energy_max: Optional[float] = None  # keV
+    description: Optional[str] = None
+
+
+class DirectViewRequest(BaseModel):
+    """Request to view raw H5 data by evaluating numpy expressions on channels."""
+    sample: str
+    dataset: str
+    scan: str
+    x_expr: str  # Expression like "energy_enc" or "instrument__energy_enc * 1000"
+    y_expr: str  # Expression like "Ir_corr / I0" or "log(instrument__Ir_corr / instrument__I0)"
 
 
 class NormalizationRequest(BaseModel):
@@ -468,6 +481,118 @@ def get_valid_rois_for_dataset(sample: str, dataset: str):
                 valid_configs.append(config)
 
     return valid_configs
+
+
+# =============================================================================
+# H5 Channel Discovery & Direct View
+# =============================================================================
+
+@router.get("/h5-channels/{sample}/{dataset}")
+def get_h5_channels_endpoint(sample: str, dataset: str):
+    """
+    Get available channels from H5 files for a sample/dataset.
+
+    Discovers parent paths (e.g., "instrument", "measurement") and
+    available channels within each path. Used for direct view mode
+    where users can select any channels without predefined ROI configs.
+
+    Note: H5 channels are discovered per dataset (files in same dataset
+    share the same beamline configuration and structure).
+    """
+    proj = get_project()
+    Q = Query()
+
+    # Get dataset info
+    ds_info = proj.db.table("datasets").get(
+        (Q.sample == sample) & (Q.dataset == dataset)
+    )
+    if not ds_info:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get H5 file path
+    if not ds_info["h5_files"]:
+        return {"sample": sample, "dataset": dataset, "parent_paths": [], "channels": {}}
+
+    h5_path = proj.project_path / ds_info["h5_files"][0]
+
+    try:
+        channel_info = get_h5_channels(str(h5_path))
+        return {
+            "sample": sample,
+            "dataset": dataset,
+            "parent_paths": channel_info["parent_paths"],
+            "channels": channel_info["channels"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read H5 file: {str(e)}")
+
+
+@router.post("/direct-view")
+def get_direct_view_data(request: DirectViewRequest):
+    """
+    Get data by evaluating numpy expressions on H5 channels.
+
+    Channel references can use:
+    - Full paths with double underscore: instrument__energy_enc
+    - Short names (if unambiguous): energy_enc
+
+    Supports mathematical expressions like:
+    - Simple channel: "energy_enc" or "instrument__energy_enc"
+    - Division: "Ir_corr / I0"
+    - Math functions (no np. prefix): "log(Ir_corr / I0)"
+    - Arithmetic: "energy_enc * 1000"
+    - Complex: "sqrt(abs(Ir_corr - Pt_corr)) / I0"
+    """
+    proj = get_project()
+    Q = Query()
+
+    # Get dataset info
+    ds_info = proj.db.table("datasets").get(
+        (Q.sample == request.sample) & (Q.dataset == request.dataset)
+    )
+    if not ds_info:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Get H5 file path
+    if not ds_info["h5_files"]:
+        raise HTTPException(status_code=404, detail="No H5 files in dataset")
+
+    h5_path = proj.project_path / ds_info["h5_files"][0]
+
+    # Get available channels as full paths (parent/channel)
+    channels_info = get_h5_channels(str(h5_path))
+    available_channels = []
+    for parent, ch_list in channels_info["channels"].items():
+        for ch in ch_list:
+            available_channels.append(f"{parent}/{ch}")
+
+    try:
+        x_data = evaluate_expression(
+            str(h5_path),
+            request.scan,
+            request.x_expr,
+            available_channels,
+        )
+        y_data = evaluate_expression(
+            str(h5_path),
+            request.scan,
+            request.y_expr,
+            available_channels,
+        )
+
+        return {
+            "x": x_data.tolist(),
+            "y": y_data.tolist(),
+            "x_label": request.x_expr,
+            "y_label": request.y_expr,
+            "scan": request.scan,
+        }
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Channel not found: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read data: {str(e)}")
 
 
 # =============================================================================

@@ -2,7 +2,7 @@
  * XAS Context - Global state management for XAS processing workflow.
  */
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useXASApi } from '../hooks/useXASApi';
 import type {
   XASProjectState,
@@ -14,6 +14,9 @@ import type {
   NormParams,
   ScanStatus,
   AveragedData,
+  H5ChannelInfo,
+  DirectViewSettings,
+  DirectViewResponse,
 } from '../types/xas';
 
 // Default normalization parameters
@@ -25,6 +28,15 @@ const DEFAULT_NORM_PARAMS: NormParams = {
   e0: null,
   step: null,
 };
+
+/** Active view settings - computed from either direct view or ROI selection */
+interface ActiveViewSettings {
+  xExpr: string;
+  yExpr: string;
+  energyMin?: number | null;
+  energyMax?: number | null;
+  fromROI: boolean;
+}
 
 interface XASContextState {
   // Project state
@@ -44,6 +56,14 @@ interface XASContextState {
   roiConfigs: ROIConfig[];
   validROIs: (ROIConfig & { valid_scan_count?: number })[];  // ROIs with data for current dataset
   references: Reference[];
+
+  // H5 Channel Discovery & Direct View
+  h5Channels: H5ChannelInfo | null;
+  directViewSettings: DirectViewSettings | null;
+  directViewData: DirectViewResponse | null;
+  directViewLoading: boolean;
+  isDirectViewMode: boolean;
+  activeViewSettings: ActiveViewSettings | null;
 
   // Current scan data
   currentScanData: NormalizedScan | null;
@@ -78,6 +98,11 @@ interface XASContextState {
   deleteReference: (name: string) => Promise<void>;
   clearError: () => void;
 
+  // H5 Channels & Direct View
+  setDirectViewSettings: (settings: DirectViewSettings | null) => void;
+  fetchDirectViewData: () => Promise<void>;
+  saveCurrentAsROI: (name: string, element?: string, energyMin?: number | null, energyMax?: number | null) => Promise<void>;
+
   // Averaging
   fetchAveragedData: () => Promise<void>;
 
@@ -87,6 +112,10 @@ interface XASContextState {
   // Navigation helpers
   goToNextScan: () => void;
   goToPrevScan: () => void;
+  goToNextSample: () => void;
+  goToPrevSample: () => void;
+  goToNextDataset: () => void;
+  goToPrevDataset: () => void;
 }
 
 const XASContext = createContext<XASContextState | null>(null);
@@ -112,6 +141,8 @@ export function XASProvider({ children }: { children: ReactNode }) {
     getAveragedData: apiGetAveragedData,
     bulkApplyParams: apiBulkApplyParams,
     getValidROIsForDataset: apiGetValidROIsForDataset,
+    getH5Channels: apiGetH5Channels,
+    getDirectViewData: apiGetDirectViewData,
   } = useXASApi();
 
   // Project state
@@ -141,8 +172,42 @@ export function XASProvider({ children }: { children: ReactNode }) {
   const [averagedData, setAveragedData] = useState<AveragedData | null>(null);
   const [averagingLoading, setAveragingLoading] = useState(false);
 
+  // H5 Channels & Direct View state
+  const [h5Channels, setH5Channels] = useState<H5ChannelInfo | null>(null);
+  const [directViewSettings, setDirectViewSettingsState] = useState<DirectViewSettings | null>(null);
+  const [directViewData, setDirectViewData] = useState<DirectViewResponse | null>(null);
+  const [directViewLoading, setDirectViewLoading] = useState(false);
+
   // Derived state
   const isProjectOpen = project?.is_open ?? false;
+
+  // Whether we're using direct view or ROI mode
+  const isDirectViewMode = !selectedROI || selectedROI === '';
+
+  // Active view settings (ROI overrides direct view)
+  const activeViewSettings = useMemo((): ActiveViewSettings | null => {
+    if (selectedROI && roiConfigs.length > 0) {
+      const roi = roiConfigs.find(r => r.name === selectedROI);
+      if (roi) {
+        // Build expression from ROI config (use full path if parent_path specified)
+        const prefix = roi.parent_path ? `${roi.parent_path}__` : '';
+        const yExpr = roi.denominator
+          ? `${prefix}${roi.numerator} / ${prefix}${roi.denominator}`
+          : `${prefix}${roi.numerator}`;
+        return {
+          xExpr: `${prefix}energy_enc`,  // ROIs always use energy as X
+          yExpr,
+          energyMin: roi.energy_min,
+          energyMax: roi.energy_max,
+          fromROI: true,
+        };
+      }
+    }
+    if (directViewSettings) {
+      return { ...directViewSettings, fromROI: false };
+    }
+    return null;
+  }, [selectedROI, roiConfigs, directViewSettings]);
 
   // Open project
   const openProject = useCallback(async (projectPath: string, beamline: string = 'BM23') => {
@@ -150,7 +215,8 @@ export function XASProvider({ children }: { children: ReactNode }) {
       const state = await apiOpenProject({ project_path: projectPath, beamline });
       setProject(state);
       setSamples(state.samples);
-      setSelectedSample(null);
+      // Auto-select first sample if available
+      setSelectedSample(state.samples.length > 0 ? state.samples[0] : null);
       setSelectedDataset(null);
       setSelectedROI(null);
       setSelectedScan(null);
@@ -166,11 +232,7 @@ export function XASProvider({ children }: { children: ReactNode }) {
       ]);
       setROIConfigs(configs);
       setReferences(refs);
-
-      // Auto-select first ROI if available
-      if (configs.length > 0) {
-        setSelectedROI(configs[0].name);
-      }
+      // Start in Direct View Mode (no ROI selected by default)
     } catch {
       // Error handled by api hook
     }
@@ -209,6 +271,86 @@ export function XASProvider({ children }: { children: ReactNode }) {
       .catch(() => setDatasets([]));
   }, [selectedSample, isProjectOpen, apiGetDatasets]);
 
+  // Auto-select first dataset when datasets change
+  useEffect(() => {
+    setSelectedDataset(prev => {
+      if (datasets.length > 0 && (!prev || !datasets.some(d => d.dataset === prev))) {
+        return datasets[0].dataset;
+      } else if (datasets.length === 0 && prev) {
+        return null;
+      }
+      return prev;
+    });
+  }, [datasets]);
+
+  // Load H5 channels when dataset changes
+  useEffect(() => {
+    if (!selectedSample || !selectedDataset || !isProjectOpen) {
+      setH5Channels(null);
+      setDirectViewSettingsState(null);
+      return;
+    }
+
+    apiGetH5Channels(selectedSample, selectedDataset)
+      .then(channels => {
+        setH5Channels(channels);
+        // Auto-select common defaults - find energy and I0 channels
+        // Use full paths (parent__channel) for clarity
+        let defaultX = '';
+        let defaultY = '';
+        let defaultXParent = '';
+        let defaultYParent = '';
+        for (const parent of channels.parent_paths) {
+          const parentChannels = channels.channels[parent] || [];
+          if (!defaultX) {
+            const energyCh = parentChannels.find(c => c.includes('energy'));
+            if (energyCh) {
+              defaultX = energyCh;
+              defaultXParent = parent;
+            }
+          }
+          if (!defaultY) {
+            const i0Ch = parentChannels.find(c => c === 'I0' || c.includes('I0'));
+            if (i0Ch) {
+              defaultY = i0Ch;
+              defaultYParent = parent;
+            }
+          }
+        }
+        // Fallback to first available channels
+        if (!defaultX && channels.parent_paths.length > 0) {
+          const firstParent = channels.parent_paths[0];
+          const first = channels.channels[firstParent];
+          if (first?.length > 0) {
+            defaultX = first[0];
+            defaultXParent = firstParent;
+          }
+        }
+        if (!defaultY && channels.parent_paths.length > 0) {
+          const firstParent = channels.parent_paths[0];
+          const first = channels.channels[firstParent];
+          if (first?.length > 1) {
+            defaultY = first[1];
+            defaultYParent = firstParent;
+          } else if (first?.length > 0) {
+            defaultY = first[0];
+            defaultYParent = firstParent;
+          }
+        }
+        // Build full path expressions (parent__channel)
+        const xExpr = defaultX && defaultXParent ? `${defaultXParent}__${defaultX}` : '';
+        const yExpr = defaultY && defaultYParent ? `${defaultYParent}__${defaultY}` : '';
+        setDirectViewSettingsState({
+          xExpr,
+          yExpr,
+        });
+      })
+      .catch(() => {
+        setH5Channels(null);
+        setDirectViewSettingsState(null);
+      });
+  }, [selectedSample, selectedDataset, isProjectOpen, apiGetH5Channels]);
+
   // Load valid ROIs when dataset changes
   useEffect(() => {
     if (!selectedSample || !selectedDataset || !isProjectOpen) {
@@ -219,11 +361,10 @@ export function XASProvider({ children }: { children: ReactNode }) {
     apiGetValidROIsForDataset(selectedSample, selectedDataset)
       .then((valid) => {
         setValidROIs(valid);
-        // Auto-select first valid ROI if current selection is not valid
+        // Only reset ROI if current selection is invalid (not in the valid list)
+        // Don't auto-select first ROI - allow Direct View Mode (null ROI)
         if (selectedROI && !valid.some(r => r.name === selectedROI)) {
-          setSelectedROI(valid.length > 0 ? valid[0].name : null);
-        } else if (!selectedROI && valid.length > 0) {
-          setSelectedROI(valid[0].name);
+          setSelectedROI(null);  // Reset to Direct View Mode if current ROI is invalid
         }
       })
       .catch(() => setValidROIs(roiConfigs));
@@ -247,6 +388,18 @@ export function XASProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     refreshScans();
   }, [refreshScans]);
+
+  // Auto-select first scan when scans change and no valid selection
+  useEffect(() => {
+    setSelectedScan(prev => {
+      if (scans.length > 0 && (!prev || !scans.includes(prev))) {
+        return scans[0];
+      } else if (scans.length === 0 && prev) {
+        return null;
+      }
+      return prev;
+    });
+  }, [scans]);
 
   // Load saved params when scan selection changes
   useEffect(() => {
@@ -274,6 +427,7 @@ export function XASProvider({ children }: { children: ReactNode }) {
   }, [selectedSample, selectedDataset, selectedROI, selectedScan, isProjectOpen, apiGetScanParams]);
 
   // Normalize scan when params change (separate from loading saved params)
+  // Only runs when we have an ROI selected (not in direct view mode)
   useEffect(() => {
     if (!selectedSample || !selectedDataset || !selectedROI || !selectedScan || !isProjectOpen) {
       return;
@@ -295,6 +449,32 @@ export function XASProvider({ children }: { children: ReactNode }) {
       .then(setCurrentScanData)
       .catch(() => setCurrentScanData(null));
   }, [selectedSample, selectedDataset, selectedROI, selectedScan, roiConfigs, isProjectOpen, apiNormalize, normParams, energyShift]);
+
+  // Fetch direct view data when settings or scan changes (only in direct view mode)
+  useEffect(() => {
+    if (!isDirectViewMode || !selectedSample || !selectedDataset || !selectedScan || !directViewSettings) {
+      setDirectViewData(null);
+      return;
+    }
+
+    // Only fetch if we have valid expressions
+    if (!directViewSettings.xExpr || !directViewSettings.yExpr) {
+      setDirectViewData(null);
+      return;
+    }
+
+    setDirectViewLoading(true);
+    apiGetDirectViewData({
+      sample: selectedSample,
+      dataset: selectedDataset,
+      scan: selectedScan,
+      x_expr: directViewSettings.xExpr,
+      y_expr: directViewSettings.yExpr,
+    })
+      .then(setDirectViewData)
+      .catch(() => setDirectViewData(null))
+      .finally(() => setDirectViewLoading(false));
+  }, [isDirectViewMode, selectedSample, selectedDataset, selectedScan, directViewSettings, apiGetDirectViewData]);
 
   // Normalize current scan with current params
   const normalizeCurrentScan = useCallback(async () => {
@@ -378,6 +558,40 @@ export function XASProvider({ children }: { children: ReactNode }) {
     }
   }, [selectedScan, scans]);
 
+  // Sample navigation
+  const goToNextSample = useCallback(() => {
+    if (!selectedSample || samples.length === 0) return;
+    const currentIndex = samples.indexOf(selectedSample);
+    if (currentIndex < samples.length - 1) {
+      setSelectedSample(samples[currentIndex + 1]);
+    }
+  }, [selectedSample, samples]);
+
+  const goToPrevSample = useCallback(() => {
+    if (!selectedSample || samples.length === 0) return;
+    const currentIndex = samples.indexOf(selectedSample);
+    if (currentIndex > 0) {
+      setSelectedSample(samples[currentIndex - 1]);
+    }
+  }, [selectedSample, samples]);
+
+  // Dataset navigation
+  const goToNextDataset = useCallback(() => {
+    if (!selectedDataset || datasets.length === 0) return;
+    const currentIndex = datasets.findIndex(d => d.dataset === selectedDataset);
+    if (currentIndex < datasets.length - 1) {
+      setSelectedDataset(datasets[currentIndex + 1].dataset);
+    }
+  }, [selectedDataset, datasets]);
+
+  const goToPrevDataset = useCallback(() => {
+    if (!selectedDataset || datasets.length === 0) return;
+    const currentIndex = datasets.findIndex(d => d.dataset === selectedDataset);
+    if (currentIndex > 0) {
+      setSelectedDataset(datasets[currentIndex - 1].dataset);
+    }
+  }, [selectedDataset, datasets]);
+
   // Set norm params
   const setNormParams = useCallback((params: Partial<NormParams>) => {
     setNormParamsState(prev => ({ ...prev, ...params }));
@@ -439,6 +653,86 @@ export function XASProvider({ children }: { children: ReactNode }) {
       // Error handled by api hook
     }
   }, [apiDeleteReference, refreshReferences]);
+
+  // Set direct view settings
+  const setDirectViewSettings = useCallback((settings: DirectViewSettings | null) => {
+    setDirectViewSettingsState(settings);
+  }, []);
+
+  // Fetch direct view data (expression-based channel data without normalization)
+  const fetchDirectViewData = useCallback(async () => {
+    if (!selectedSample || !selectedDataset || !selectedScan || !directViewSettings) {
+      setDirectViewData(null);
+      return;
+    }
+
+    setDirectViewLoading(true);
+    try {
+      const data = await apiGetDirectViewData({
+        sample: selectedSample,
+        dataset: selectedDataset,
+        scan: selectedScan,
+        x_expr: directViewSettings.xExpr,
+        y_expr: directViewSettings.yExpr,
+      });
+      setDirectViewData(data);
+    } catch {
+      setDirectViewData(null);
+    } finally {
+      setDirectViewLoading(false);
+    }
+  }, [selectedSample, selectedDataset, selectedScan, directViewSettings, apiGetDirectViewData]);
+
+  // Save current direct view settings as a new ROI config
+  // Extracts numerator/denominator from the Y expression if it's a simple "a / b" pattern
+  const saveCurrentAsROI = useCallback(async (
+    name: string,
+    element?: string,
+    energyMin?: number | null,
+    energyMax?: number | null,
+  ) => {
+    if (!directViewSettings) return;
+
+    // Parse Y expression to extract numerator/denominator
+    // Supports: "channel" or "channel / denominator" (with optional parent__ prefix)
+    const yMatch = directViewSettings.yExpr.match(/^\s*((?:\w+__)?\w+)\s*(?:\/\s*((?:\w+__)?\w+))?\s*$/);
+    const numerator = yMatch?.[1] || directViewSettings.yExpr;
+    const denominator = yMatch?.[2] || null;
+
+    // Extract parent_path from numerator if it has __ prefix
+    let parent_path = 'instrument';
+    let cleanNumerator = numerator;
+    let cleanDenominator = denominator;
+    if (numerator.includes('__')) {
+      const parts = numerator.split('__');
+      parent_path = parts[0];
+      cleanNumerator = parts.slice(1).join('__');
+    }
+    if (denominator?.includes('__')) {
+      cleanDenominator = denominator.split('__').slice(1).join('__');
+    }
+
+    const newConfig: ROIConfig = {
+      name,
+      element: element || undefined,
+      parent_path,
+      numerator: cleanNumerator,
+      denominator: cleanDenominator,
+      invert_y: false,
+      energy_min: energyMin ?? null,
+      energy_max: energyMax ?? null,
+    };
+
+    try {
+      await apiSaveROIConfig(newConfig);
+      const configs = await apiGetROIConfigs();
+      setROIConfigs(configs);
+      // Select the newly created ROI
+      setSelectedROI(name);
+    } catch {
+      // Error handled by api hook
+    }
+  }, [directViewSettings, apiSaveROIConfig, apiGetROIConfigs]);
 
   // Fetch averaged data for current dataset/ROI
   const fetchAveragedData = useCallback(async () => {
@@ -510,6 +804,14 @@ export function XASProvider({ children }: { children: ReactNode }) {
     loading: apiLoading,
     error: apiError,
 
+    // H5 Channels & Direct View state
+    h5Channels,
+    directViewSettings,
+    directViewData,
+    directViewLoading,
+    isDirectViewMode,
+    activeViewSettings,
+
     // Actions
     openProject,
     closeProject,
@@ -532,6 +834,15 @@ export function XASProvider({ children }: { children: ReactNode }) {
     applyParamsToAllScans,
     goToNextScan,
     goToPrevScan,
+    goToNextSample,
+    goToPrevSample,
+    goToNextDataset,
+    goToPrevDataset,
+
+    // H5 Channels & Direct View actions
+    setDirectViewSettings,
+    fetchDirectViewData,
+    saveCurrentAsROI,
   };
 
   return (

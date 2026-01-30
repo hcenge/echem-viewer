@@ -1,28 +1,32 @@
 /**
  * XAS Sidebar - Navigation and scan selection.
+ *
+ * Keyboard shortcuts (QWEASD):
+ * - W/S: Navigate samples
+ * - Q/E: Navigate datasets
+ * - A/D: Navigate scans
  */
 
+import { useEffect } from 'react';
 import {
   Box,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
   Paper,
   Typography,
   IconButton,
   Chip,
-  List,
-  ListItemButton,
-  ListItemText,
   Divider,
+  TextField,
+  Autocomplete,
 } from '@mui/material';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RemoveCircleIcon from '@mui/icons-material/RemoveCircle';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import { useXAS } from '../../contexts/XASContext';
+import { ChannelSelector } from './ChannelSelector';
 
 export function XASSidebar() {
   const {
@@ -42,7 +46,55 @@ export function XASSidebar() {
     selectScan,
     goToNextScan,
     goToPrevScan,
+    goToNextSample,
+    goToPrevSample,
+    goToNextDataset,
+    goToPrevDataset,
   } = useXAS();
+
+  // Keyboard navigation (QWEASD)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if user is typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case 'w':
+          e.preventDefault();
+          goToPrevSample();
+          break;
+        case 's':
+          e.preventDefault();
+          goToNextSample();
+          break;
+        case 'q':
+          e.preventDefault();
+          goToPrevDataset();
+          break;
+        case 'e':
+          e.preventDefault();
+          goToNextDataset();
+          break;
+        case 'a':
+          e.preventDefault();
+          goToPrevScan();
+          break;
+        case 'd':
+          e.preventDefault();
+          goToNextScan();
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [goToNextScan, goToPrevScan, goToNextSample, goToPrevSample, goToNextDataset, goToPrevDataset]);
+
+  // Computed indices for display
+  const currentSampleIndex = selectedSample ? samples.indexOf(selectedSample) : -1;
+  const currentDatasetIndex = selectedDataset ? datasets.findIndex(d => d.dataset === selectedDataset) : -1;
 
   if (!isProjectOpen) {
     return (
@@ -69,162 +121,186 @@ export function XASSidebar() {
   };
 
   return (
-    <Paper sx={{ p: 2, width: 280, display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Sample selector */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>Sample</InputLabel>
-        <Select
-          value={selectedSample || ''}
-          label="Sample"
-          onChange={(e) => selectSample(e.target.value || null)}
-        >
-          <MenuItem value="">
-            <em>Select sample...</em>
-          </MenuItem>
-          {samples.map((sample) => (
-            <MenuItem key={sample} value={sample}>
-              {sample}
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
+    <Paper sx={{ p: 2, width: 280, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* Navigation Section - Sample, Dataset, Scan */}
+      <Typography variant="overline" color="text.secondary" sx={{ mb: -0.5, fontSize: '0.65rem' }}>
+        Keys: W/S samples, Q/E datasets, A/D scans
+      </Typography>
 
-      {/* Dataset list */}
-      {selectedSample && (
-        <>
-          <Typography variant="subtitle2" color="text.secondary">
-            Datasets
-          </Typography>
-          <List dense sx={{ maxHeight: 200, overflow: 'auto', bgcolor: 'grey.50', borderRadius: 1 }}>
-            {datasets.map((ds) => (
-              <ListItemButton
-                key={ds.dataset}
-                selected={ds.dataset === selectedDataset}
-                onClick={() => selectDataset(ds.dataset)}
-              >
-                <ListItemText
-                  primary={ds.dataset}
-                  secondary={`${ds.h5_files.length} files`}
-                />
-              </ListItemButton>
-            ))}
-            {datasets.length === 0 && (
-              <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-                No datasets found
+      {/* Sample selector with W/S navigation */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+          <IconButton
+            size="small"
+            onClick={goToPrevSample}
+            disabled={currentSampleIndex <= 0}
+            sx={{ p: 0.25 }}
+            title="W"
+          >
+            <KeyboardArrowUpIcon fontSize="small" />
+          </IconButton>
+          <IconButton
+            size="small"
+            onClick={goToNextSample}
+            disabled={currentSampleIndex >= samples.length - 1}
+            sx={{ p: 0.25 }}
+            title="S"
+          >
+            <KeyboardArrowDownIcon fontSize="small" />
+          </IconButton>
+        </Box>
+        <Autocomplete
+          size="small"
+          options={samples}
+          value={selectedSample}
+          onChange={(_, value) => selectSample(value)}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label={`Sample${samples.length > 0 ? ` (${currentSampleIndex + 1}/${samples.length})` : ''}`}
+            />
+          )}
+          fullWidth
+          sx={{ flex: 1 }}
+        />
+      </Box>
+
+      {/* Dataset selector with Q/E navigation */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+          <IconButton
+            size="small"
+            onClick={goToPrevDataset}
+            disabled={!selectedSample || currentDatasetIndex <= 0}
+            sx={{ p: 0.25 }}
+            title="Q"
+          >
+            <KeyboardArrowUpIcon fontSize="small" />
+          </IconButton>
+          <IconButton
+            size="small"
+            onClick={goToNextDataset}
+            disabled={!selectedSample || currentDatasetIndex >= datasets.length - 1}
+            sx={{ p: 0.25 }}
+            title="E"
+          >
+            <KeyboardArrowDownIcon fontSize="small" />
+          </IconButton>
+        </Box>
+        <Autocomplete
+          size="small"
+          options={datasets}
+          getOptionLabel={(option) => option.dataset}
+          value={datasets.find(d => d.dataset === selectedDataset) || null}
+          onChange={(_, value) => selectDataset(value?.dataset || null)}
+          disabled={!selectedSample}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label={`Dataset${datasets.length > 0 ? ` (${currentDatasetIndex + 1}/${datasets.length})` : ''}`}
+            />
+          )}
+          renderOption={(props, option) => (
+            <Box component="li" {...props} sx={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+              <span>{option.dataset}</span>
+              <Typography variant="caption" color="text.secondary">
+                {option.h5_files.length} files
               </Typography>
-            )}
-          </List>
-        </>
-      )}
+            </Box>
+          )}
+          fullWidth
+          sx={{ flex: 1 }}
+        />
+      </Box>
 
-      <Divider />
-
-      {/* ROI selector */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>ROI / Channel</InputLabel>
-        <Select
-          value={selectedROI || ''}
-          label="ROI / Channel"
-          onChange={(e) => selectROI(e.target.value || null)}
+      {/* Scan selector with A/D navigation */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        <IconButton
+          size="small"
+          onClick={goToPrevScan}
+          disabled={!selectedDataset || currentScanIndex <= 0}
+          title="A"
+        >
+          <NavigateBeforeIcon fontSize="small" />
+        </IconButton>
+        <Autocomplete
+          size="small"
+          options={scans}
+          value={selectedScan}
+          onChange={(_, value) => selectScan(value)}
           disabled={!selectedDataset}
-        >
-          <MenuItem value="">
-            <em>{selectedDataset ? 'Select ROI...' : 'Select dataset first'}</em>
-          </MenuItem>
-          {validROIs.map((roi) => (
-            <MenuItem key={roi.name} value={roi.name}>
-              <Box sx={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'space-between' }}>
-                <span>{roi.name}</span>
-                {roi.valid_scan_count && (
-                  <Chip
-                    label={`${roi.valid_scan_count}`}
-                    size="small"
-                    variant="outlined"
-                    sx={{ ml: 1, height: 20, fontSize: '0.7rem' }}
-                  />
-                )}
-              </Box>
-            </MenuItem>
-          ))}
-          {validROIs.length === 0 && selectedDataset && (
-            <MenuItem disabled>
-              <em>No ROIs with data</em>
-            </MenuItem>
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label={`Scan${scans.length > 0 ? ` (${currentScanIndex + 1}/${scans.length})` : ''}`}
+            />
           )}
-        </Select>
-      </FormControl>
-      {selectedDataset && validROIs.length === 0 && (
-        <Typography variant="caption" color="error">
-          No ROI channels have data in this dataset
-        </Typography>
+          fullWidth
+          sx={{ flex: 1 }}
+        />
+        <IconButton
+          size="small"
+          onClick={goToNextScan}
+          disabled={!selectedDataset || currentScanIndex >= scans.length - 1}
+          title="D"
+        >
+          <NavigateNextIcon fontSize="small" />
+        </IconButton>
+      </Box>
+
+      {/* Scan status indicator */}
+      {selectedScan && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, pl: 1 }}>
+          {getStatusIcon(currentScanParams?.status)}
+          <Typography variant="body2">
+            {currentScanParams?.status || 'Unreviewed'}
+          </Typography>
+        </Box>
       )}
 
       <Divider />
 
-      {/* Scan navigation */}
-      {selectedDataset && selectedROI && (
-        <>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="subtitle2" color="text.secondary">
-              Scans ({scans.length})
-            </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <IconButton
-                size="small"
-                onClick={goToPrevScan}
-                disabled={currentScanIndex <= 0}
-              >
-                <NavigateBeforeIcon />
-              </IconButton>
+      {/* Channel Selection - direct view mode */}
+      {selectedDataset && (
+        <ChannelSelector />
+      )}
+
+      <Divider />
+
+      {/* ROI selector (optional - overrides channel selection) */}
+      <Autocomplete
+        size="small"
+        options={validROIs}
+        getOptionLabel={(option) => option.name}
+        value={validROIs.find(r => r.name === selectedROI) || null}
+        onChange={(_, value) => selectROI(value?.name || null)}
+        disabled={!selectedDataset}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            label="ROI (optional)"
+            placeholder={selectedDataset ? 'Direct View Mode' : 'Select dataset first'}
+          />
+        )}
+        renderOption={(props, option) => (
+          <Box component="li" {...props} sx={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+            <span>{option.name}</span>
+            {option.valid_scan_count && (
               <Chip
-                label={selectedScan || '—'}
+                label={`${option.valid_scan_count}`}
                 size="small"
-                sx={{ minWidth: 60 }}
+                variant="outlined"
+                sx={{ ml: 1, height: 20, fontSize: '0.7rem' }}
               />
-              <IconButton
-                size="small"
-                onClick={goToNextScan}
-                disabled={currentScanIndex >= scans.length - 1}
-              >
-                <NavigateNextIcon />
-              </IconButton>
-            </Box>
-          </Box>
-
-          {/* Scan status indicator */}
-          {selectedScan && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              {getStatusIcon(currentScanParams?.status)}
-              <Typography variant="body2">
-                {currentScanParams?.status || 'Unreviewed'}
-              </Typography>
-              {currentScanIndex >= 0 && (
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 'auto' }}>
-                  {currentScanIndex + 1} / {scans.length}
-                </Typography>
-              )}
-            </Box>
-          )}
-
-          {/* Scan list */}
-          <List dense sx={{ maxHeight: 300, overflow: 'auto', bgcolor: 'grey.50', borderRadius: 1 }}>
-            {scans.map((scan) => (
-              <ListItemButton
-                key={scan}
-                selected={scan === selectedScan}
-                onClick={() => selectScan(scan)}
-                sx={{ py: 0.5 }}
-              >
-                <ListItemText primary={scan} />
-              </ListItemButton>
-            ))}
-            {scans.length === 0 && (
-              <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-                No valid scans
-              </Typography>
             )}
-          </List>
-        </>
+          </Box>
+        )}
+        fullWidth
+      />
+      {selectedDataset && validROIs.length === 0 && (
+        <Typography variant="caption" color="text.secondary">
+          No saved ROIs - use channel selector above
+        </Typography>
       )}
     </Paper>
   );

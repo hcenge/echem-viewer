@@ -5,9 +5,48 @@
 /** ROI configuration for XAS processing */
 export interface ROIConfig {
   name: string;
+  display_name?: string;
+  element?: string;  // e.g., "Ir", "Pt", "Co"
+  parent_path: string;
   numerator: string;
   denominator: string | null;
+  invert_y: boolean;
+  energy_min: number | null;  // keV
+  energy_max: number | null;  // keV
   description?: string;
+  valid_scan_count?: number;  // Set when fetching valid ROIs
+}
+
+/** H5 channel information for direct view mode */
+export interface H5ChannelInfo {
+  sample: string;
+  dataset: string;
+  parent_paths: string[];
+  channels: Record<string, string[]>;  // parent_path -> channel names
+}
+
+/** Settings for direct channel view mode (expression-based) */
+export interface DirectViewSettings {
+  xExpr: string;  // Expression for X axis (e.g., "energy_enc" or "instrument__energy_enc * 1000")
+  yExpr: string;  // Expression for Y axis (e.g., "Ir_corr / I0" or "log(Ir_corr / I0)")
+}
+
+/** Request for direct view data */
+export interface DirectViewRequest {
+  sample: string;
+  dataset: string;
+  scan: string;
+  x_expr: string;  // Expression for X axis
+  y_expr: string;  // Expression for Y axis
+}
+
+/** Response from direct view endpoint */
+export interface DirectViewResponse {
+  x: number[];
+  y: number[];
+  x_label: string;
+  y_label: string;
+  scan: string;
 }
 
 /** Normalization parameters for a scan */
