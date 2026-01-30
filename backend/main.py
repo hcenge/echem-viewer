@@ -34,6 +34,7 @@ from echem_core import (
     current_at_potential,
     steady_state_potential,
 )
+from routers import xas_router
 from state import (
     session_manager,
     SessionState,
@@ -76,6 +77,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include XAS router
+app.include_router(xas_router, prefix="/api/xas", tags=["XAS"])
 
 
 # ============== Session Dependency ==============

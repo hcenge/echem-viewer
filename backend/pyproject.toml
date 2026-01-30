@@ -10,6 +10,11 @@ dependencies = [
     "polars>=0.20.0",
     "pint>=0.23",
     "galvani>=0.5.0",
+    # XAS dependencies
+    "xraylarch>=0.9.75",
+    "tinydb>=4.8.0",
+    "h5py>=3.10.0",
+    "scipy>=1.11.0",
 ]
 
 [tool.uv]

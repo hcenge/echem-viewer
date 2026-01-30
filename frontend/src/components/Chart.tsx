@@ -93,11 +93,10 @@ export function Chart({
       setError(null);
 
       try {
-        const results: TraceData[] = [];
-
-        for (const filename of selectedFiles) {
+        // Fetch all files in parallel to eliminate waterfall
+        const fetchPromises = selectedFiles.map(async (filename) => {
           const fileInfo = fileInfoMap[filename];
-          if (!fileInfo) continue;
+          if (!fileInfo) return null;
 
           const cycles = selectedCycles?.[filename];
 
@@ -112,20 +111,21 @@ export function Chart({
 
           const data = await getData(filename, settings.xCol, settings.yCol, cycles, irResistance);
 
-          if (cancelled) return;
-
-          results.push({
+          return {
             filename,
             label: fileInfo.label,
             technique: fileInfo.technique,
             timestamp: fileInfo.timestamp,
             x: data.x,
             y: data.y,
-          });
-        }
+          };
+        });
+
+        const results = await Promise.all(fetchPromises);
 
         if (!cancelled) {
-          setTraceData(results);
+          // Filter out null results (files that weren't found)
+          setTraceData(results.filter((r): r is TraceData => r !== null));
         }
       } catch (e) {
         if (!cancelled) {
@@ -543,7 +543,7 @@ export function Chart({
     });
 
     return { plotData: traces, layout: layoutConfig };
-  }, [traceData, settings, getTraceName]);
+  }, [traceData, settings, customColumns]);
 
   // Export CSV handler
   const handleExportCSV = useCallback(() => {

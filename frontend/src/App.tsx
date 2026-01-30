@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import {
   Box,
   CssBaseline,
@@ -18,18 +18,30 @@ import {
   Button,
   Chip,
   Tooltip,
+  Tabs,
+  Tab,
+  CircularProgress,
 } from '@mui/material';
+import ScienceIcon from '@mui/icons-material/Science';
+import WavesIcon from '@mui/icons-material/Waves';
 import { useApi } from './hooks/useApi';
-import { FileTable } from './components/FileTable/index';
+import { FileTable } from './components/FileTable';
 import { Chart } from './components/Chart';
 import { TechniqueTabs } from './components/TechniqueTabs';
-import { Sidebar } from './components/Sidebar/index';
+import { Sidebar } from './components/Sidebar';
 import { PlotsList } from './components/PlotsList';
 import { ExportPanel } from './components/ExportPanel';
-import { AnalysisPanel } from './components/analysis';
+import { AnalysisPanel } from './components/analysis/index';
 import type { ChartSettings } from './components/Chart';
 import { CHART_DEFAULTS } from './constants/chart';
 import type { FileInfo, DataResponse, PlotConfig, SessionStats, PlotConfigExport } from './types/api';
+
+// Lazy load XAS components - only loaded when user switches to XAS mode
+const XASContent = lazy(() =>
+  import('./components/XAS/XASContent').then(module => ({ default: module.XASContent }))
+);
+
+type AppMode = 'echem' | 'xas';
 
 // Generate unique ID for plots
 function generateId(): string {
@@ -59,6 +71,9 @@ function App() {
     exportSession,
     importCorrelations,
   } = useApi();
+
+  // App mode: electrochemistry or XAS
+  const [appMode, setAppMode] = useState<AppMode>('echem');
 
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
@@ -805,10 +820,34 @@ function App() {
         {/* Header */}
         <AppBar position="static">
           <Toolbar>
-            <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-              Electrochemistry Data Viewer
+            <Typography variant="h6" component="div" sx={{ mr: 4 }}>
+              Operando Workbench
             </Typography>
-            {stats && (
+            <Tabs
+              value={appMode}
+              onChange={(_, newValue) => setAppMode(newValue)}
+              textColor="inherit"
+              sx={{
+                flexGrow: 1,
+                '& .MuiTab-root': { color: 'rgba(255,255,255,0.7)', minHeight: 64 },
+                '& .Mui-selected': { color: 'white !important' },
+                '& .MuiTabs-indicator': { backgroundColor: 'white' },
+              }}
+            >
+              <Tab
+                value="echem"
+                label="Electrochemistry"
+                icon={<ScienceIcon />}
+                iconPosition="start"
+              />
+              <Tab
+                value="xas"
+                label="XAS"
+                icon={<WavesIcon />}
+                iconPosition="start"
+              />
+            </Tabs>
+            {appMode === 'echem' && stats && (
               <Tooltip title={`Memory: ~${stats.memory_mb}MB`}>
                 <Chip
                   label={`${stats.file_count}/${stats.max_files} files`}
@@ -823,6 +862,15 @@ function App() {
 
         {/* Main Content */}
         <Container maxWidth="xl" sx={{ mt: 3, mb: 3, flex: 1 }}>
+          {/* XAS Mode - lazy loaded */}
+          {appMode === 'xas' && (
+            <Suspense fallback={<Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}><CircularProgress /></Box>}>
+              <XASContent />
+            </Suspense>
+          )}
+
+          {/* Electrochemistry Mode */}
+          {appMode === 'echem' && (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             {/* File Table */}
             <Box>
@@ -912,6 +960,7 @@ function App() {
               </Box>
             </Box>
           </Box>
+          )}
         </Container>
 
         {/* Unsaved Changes Dialog */}
@@ -955,8 +1004,8 @@ function App() {
           >
             <strong>Some files failed to upload:</strong>
             <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
-              {uploadErrors.map((err, i) => (
-                <li key={i}>{err}</li>
+              {uploadErrors.map((err) => (
+                <li key={err}>{err}</li>
               ))}
             </ul>
           </Alert>

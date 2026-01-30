@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Box, Slider, Typography } from '@mui/material';
 
 interface SettingSliderProps {
@@ -23,6 +24,14 @@ export function SettingSlider({
   showValue = true,
   valueSuffix = '',
 }: SettingSliderProps) {
+  // Local state for immediate visual feedback during drag
+  const [localValue, setLocalValue] = useState(value);
+
+  // Sync local value when prop changes from outside
+  useEffect(() => {
+    setLocalValue(value);
+  }, [value]);
+
   return (
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
@@ -31,14 +40,15 @@ export function SettingSlider({
         </Typography>
         {showValue && (
           <Typography variant="body2" color="text.primary">
-            {value}{valueSuffix}
+            {localValue}{valueSuffix}
           </Typography>
         )}
       </Box>
       <Slider
         size="small"
-        value={value}
-        onChange={(_, v) => onChange(v as number)}
+        value={localValue}
+        onChange={(_, v) => setLocalValue(v as number)}
+        onChangeCommitted={(_, v) => onChange(v as number)}
         min={min}
         max={max}
         step={step}
